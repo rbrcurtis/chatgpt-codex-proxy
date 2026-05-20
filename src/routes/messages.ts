@@ -25,9 +25,70 @@ import { transformCodexToAnthropic } from "../transformers/response.js";
 import type { AnthropicRequest, AnthropicResponse } from "../types/anthropic.js";
 import { ProxyError } from "../utils/errors.js";
 import { mcpToolRegistry } from "../mcp/registry.js";
+import { OllamaClient } from "../ollama/client.js";
+import { extractRouteKey, loadRoutingConfigFromEnv, resolveBackendRoute } from "../routing/routes.js";
 
 const router = Router();
 const codexClient = new CodexClient();
+const ollamaClient = new OllamaClient();
+
+async function handleCodexMessages(body: AnthropicRequest): Promise<AnthropicResponse> {
+  const inboundThinking = body.thinking?.type === "enabled"
+    ? `enabled(budget=${body.thinking.budget_tokens ?? "?"})`
+    : "disabled";
+  console.log(
+    `[chatgpt-codex-proxy] inbound messages model=${body.model} stream=${Boolean(body.stream)} messages=${body.messages.length} thinking=${inboundThinking}`,
+  );
+
+  // Transform and call Codex
+  const codexRequest = transformAnthropicToCodex(body);
+
+  /*
+  MCP 툴 주입: 레지스트리에 캐시된 MCP 툴을 Codex 요청에 추가한다.
+  deferred tools 는 anthropic.tools 배열에 포함되지 않으므로 중복 없이 주입 가능.
+  이름이 이미 존재하는 툴은 건너뛴다(Claude Code가 직접 전달한 툴 우선).
+  */
+  const mcpTools = mcpToolRegistry.getTools();
+  if (mcpTools.length > 0) {
+    const existingNames = new Set((codexRequest.tools ?? []).map((t) => t.name));
+    const newMcpTools = mcpTools.filter((t) => !existingNames.has(t.name));
+    if (newMcpTools.length > 0) {
+      codexRequest.tools = [...(codexRequest.tools ?? []), ...newMcpTools];
+      codexRequest.tool_choice = codexRequest.tool_choice ?? "auto";
+    }
+  }
+
+  const inboundParallel = body.parallel_tool_calls;
+  const inboundToolCount = body.tools?.length ?? 0;
+  const inboundToolChoice = body.tool_choice?.type ?? "none";
+  const inboundToolNames = (body.tools ?? []).map((tool) => tool.name).join(",");
+
+  console.log(
+    `[chatgpt-codex-proxy] tool_plan inbound_parallel=${String(inboundParallel)} effective_parallel=${String(
+      codexRequest.parallel_tool_calls,
+    )} tool_count=${inboundToolCount} inbound_tool_choice=${inboundToolChoice} codex_tool_choice=${String(codexRequest.tool_choice)} tool_names=[${inboundToolNames}]`,
+  );
+
+  const codexResponse = await codexClient.createResponse(codexRequest);
+  const anthropicResponse = transformCodexToAnthropic(codexResponse, body.model);
+
+  const codexFunctionCalls = (codexResponse.output ?? []).filter((item) => item.type === "function_call").length;
+  const codexOutputText = (codexResponse.output ?? []).reduce((acc, item) => {
+    const parts = item.content ?? [];
+    return (
+      acc +
+      parts.filter((part) => part.type === "output_text" && typeof part.text === "string" && part.text.length > 0).length
+    );
+  }, 0);
+  const anthropicToolUse = (anthropicResponse.content ?? []).filter((block) => block.type === "tool_use").length;
+  const anthropicText = (anthropicResponse.content ?? []).filter((block) => block.type === "text").length;
+
+  console.log(
+    `[chatgpt-codex-proxy] tool_diag parallel=${String(codexRequest.parallel_tool_calls)} codex_fn_calls=${codexFunctionCalls} codex_text_blocks=${codexOutputText} anthropic_tool_use=${anthropicToolUse} anthropic_text_blocks=${anthropicText} stop_reason=${anthropicResponse.stop_reason}`,
+  );
+
+  return anthropicResponse;
+}
 
 router.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({
@@ -62,59 +123,15 @@ router.post(
         );
       }
 
-      const inboundThinking = body.thinking?.type === "enabled"
-        ? `enabled(budget=${body.thinking.budget_tokens ?? "?"})`
-        : "disabled";
-      console.log(
-        `[chatgpt-codex-proxy] inbound messages model=${body.model} stream=${Boolean(body.stream)} messages=${body.messages.length} thinking=${inboundThinking}`,
-      );
+      const routeKey = extractRouteKey(req.headers);
+      const routingConfig = loadRoutingConfigFromEnv();
+      const backend = resolveBackendRoute(routeKey, routingConfig);
+      console.log(`[chatgpt-codex-proxy] route key=${backend.routeKey} kind=${backend.route.kind} model=${body.model}`);
 
-      // Transform and call Codex
-      const codexRequest = transformAnthropicToCodex(body);
-
-      /*
-      MCP 툴 주입: 레지스트리에 캐시된 MCP 툴을 Codex 요청에 추가한다.
-      deferred tools 는 anthropic.tools 배열에 포함되지 않으므로 중복 없이 주입 가능.
-      이름이 이미 존재하는 툴은 건너뛴다(Claude Code가 직접 전달한 툴 우선).
-      */
-      const mcpTools = mcpToolRegistry.getTools();
-      if (mcpTools.length > 0) {
-        const existingNames = new Set((codexRequest.tools ?? []).map((t) => t.name));
-        const newMcpTools = mcpTools.filter((t) => !existingNames.has(t.name));
-        if (newMcpTools.length > 0) {
-          codexRequest.tools = [...(codexRequest.tools ?? []), ...newMcpTools];
-          codexRequest.tool_choice = codexRequest.tool_choice ?? "auto";
-        }
-      }
-
-      const inboundParallel = body.parallel_tool_calls;
-      const inboundToolCount = body.tools?.length ?? 0;
-      const inboundToolChoice = body.tool_choice?.type ?? "none";
-      const inboundToolNames = (body.tools ?? []).map((tool) => tool.name).join(",");
-
-      console.log(
-        `[chatgpt-codex-proxy] tool_plan inbound_parallel=${String(inboundParallel)} effective_parallel=${String(
-          codexRequest.parallel_tool_calls,
-        )} tool_count=${inboundToolCount} inbound_tool_choice=${inboundToolChoice} codex_tool_choice=${String(codexRequest.tool_choice)} tool_names=[${inboundToolNames}]`,
-      );
-
-      const codexResponse = await codexClient.createResponse(codexRequest);
-      const anthropicResponse = transformCodexToAnthropic(codexResponse, body.model);
-
-      const codexFunctionCalls = (codexResponse.output ?? []).filter((item) => item.type === "function_call").length;
-      const codexOutputText = (codexResponse.output ?? []).reduce((acc, item) => {
-        const parts = item.content ?? [];
-        return (
-          acc +
-          parts.filter((part) => part.type === "output_text" && typeof part.text === "string" && part.text.length > 0).length
-        );
-      }, 0);
-      const anthropicToolUse = (anthropicResponse.content ?? []).filter((block) => block.type === "tool_use").length;
-      const anthropicText = (anthropicResponse.content ?? []).filter((block) => block.type === "text").length;
-
-      console.log(
-        `[chatgpt-codex-proxy] tool_diag parallel=${String(codexRequest.parallel_tool_calls)} codex_fn_calls=${codexFunctionCalls} codex_text_blocks=${codexOutputText} anthropic_tool_use=${anthropicToolUse} anthropic_text_blocks=${anthropicText} stop_reason=${anthropicResponse.stop_reason}`,
-      );
+      const anthropicResponse =
+        backend.route.kind === "ollama"
+          ? await ollamaClient.createMessage(backend.route, body)
+          : await handleCodexMessages(body);
 
       // Handle streaming
       if (body.stream) {
@@ -220,6 +237,10 @@ router.post(
       // Non-streaming response
       res.status(200).json(anthropicResponse);
     } catch (error) {
+      if (error instanceof ProxyError) {
+        return next(error);
+      }
+
       if (error instanceof CodexApiError) {
         if (error.status === 401) {
           return next(new ProxyError(error.message, 401, "authentication_error"));
