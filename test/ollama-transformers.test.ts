@@ -113,6 +113,7 @@ test("converts anthropic tool_use/tool_result history", () => {
       {
         role: "assistant",
         content: [
+          { type: "text", text: "I will read it." },
           { type: "tool_use", id: "call-1", name: "read_file", input: { path: "/tmp/a.txt" } },
           { type: "tool_result", tool_use_id: "call-1", content: "file text" },
         ],
@@ -125,7 +126,7 @@ test("converts anthropic tool_use/tool_result history", () => {
   assert.deepEqual(transformed.messages, [
     {
       role: "assistant",
-      content: null,
+      content: "I will read it.",
       tool_calls: [
         {
           id: "call-1",
@@ -229,6 +230,41 @@ test("converts openai tool_calls to anthropic tool_use blocks", () => {
       output_tokens: 22,
     },
   });
+});
+
+test("maps length finish_reason to max_tokens", () => {
+  const response: OpenAIChatCompletionResponse = {
+    choices: [
+      {
+        message: {
+          role: "assistant",
+          content: "truncated",
+        },
+        finish_reason: "length",
+      },
+    ],
+  };
+
+  const anthropic = transformOllamaChatToAnthropic(response, sampleModel);
+
+  assert.equal(anthropic.stop_reason, "max_tokens");
+});
+
+test("maps missing finish_reason to end_turn", () => {
+  const response: OpenAIChatCompletionResponse = {
+    choices: [
+      {
+        message: {
+          role: "assistant",
+          content: "hello",
+        },
+      },
+    ],
+  };
+
+  const anthropic = transformOllamaChatToAnthropic(response, sampleModel);
+
+  assert.equal(anthropic.stop_reason, "end_turn");
 });
 
 test("maps missing response id and model fallback to requested model", () => {

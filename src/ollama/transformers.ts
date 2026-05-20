@@ -41,6 +41,73 @@ function messageContentToText(message: { content: string | ContentBlock[] | unde
   return flattenAnthropicText(message.content).trim();
 }
 
+function serializeToolInput(input: unknown): string {
+  if (input === undefined) return "{}";
+  if (typeof input === "string") return input;
+  return JSON.stringify(input);
+}
+
+function transformAssistantBlocks(content: ContentBlock[]): OpenAIChatMessage[] {
+  const messages: OpenAIChatMessage[] = [];
+  const textParts: string[] = [];
+  const toolCalls: OpenAIToolCall[] = [];
+
+  for (const block of content) {
+    if (block.type === "text" && block.text.length > 0) {
+      textParts.push(block.text);
+      continue;
+    }
+
+    if (block.type === "tool_use") {
+      toolCalls.push({
+        id: block.id,
+        type: "function",
+        function: {
+          name: block.name,
+          arguments: serializeToolInput(block.input),
+        },
+      });
+      continue;
+    }
+
+    if (block.type === "tool_result") {
+      if (textParts.length > 0 || toolCalls.length > 0) {
+        messages.push({
+          role: "assistant",
+          content: textParts.length > 0 ? textParts.join("\n") : null,
+          tool_calls: toolCalls.length > 0 ? [...toolCalls] : undefined,
+        });
+        textParts.length = 0;
+        toolCalls.length = 0;
+      }
+
+      const toolResultText =
+        typeof block.content === "string"
+          ? block.content
+          : typeof block.content === "undefined"
+            ? block.is_error
+              ? "Tool execution failed"
+              : ""
+            : block.content
+              .map((part) => (part.type === "text" ? part.text : ""))
+              .filter((value) => value.length > 0)
+              .join("\n");
+
+      messages.push({ role: "tool", content: toolResultText, tool_call_id: block.tool_use_id });
+    }
+  }
+
+  if (textParts.length > 0 || toolCalls.length > 0) {
+    messages.push({
+      role: "assistant",
+      content: textParts.length > 0 ? textParts.join("\n") : null,
+      tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+    });
+  }
+
+  return messages;
+}
+
 function transformContentToOllamaMessages(req: AnthropicRequest): OpenAIChatMessage[] {
   const messages: OpenAIChatMessage[] = [];
   const systemText = extractSystemText(req.system);
@@ -58,32 +125,17 @@ function transformContentToOllamaMessages(req: AnthropicRequest): OpenAIChatMess
       continue;
     }
 
-    const role = msg.role;
+    if (msg.role === "assistant") {
+      messages.push(...transformAssistantBlocks(msg.content));
+      continue;
+    }
+
     const text = messageContentToText(msg);
     if (text.length > 0) {
-      messages.push({ role, content: text });
+      messages.push({ role: msg.role, content: text });
     }
 
     for (const block of msg.content) {
-      if (block.type === "tool_use") {
-        const toolCalls: OpenAIToolCall[] = [
-          {
-            id: block.id,
-            type: "function",
-            function: {
-              name: block.name,
-              arguments:
-                block.input === undefined
-                  ? "{}"
-                  : typeof block.input === "string"
-                    ? block.input
-                    : JSON.stringify(block.input),
-            },
-          },
-        ];
-        messages.push({ role: "assistant", content: null, tool_calls: toolCalls });
-      }
-
       if (block.type === "tool_result") {
         const toolResultText =
           typeof block.content === "string"
