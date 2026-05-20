@@ -26,6 +26,14 @@ test("extractRouteKey reads bearer token when x-api-key is absent", () => {
   assert.equal(extractRouteKey(headers), "token-123");
 });
 
+test("extractRouteKey ignores dummy bearer placeholder", () => {
+  const headers: HeaderBag = {
+    authorization: "Bearer dummy",
+  };
+
+  assert.equal(extractRouteKey(headers), undefined);
+});
+
 test("extractRouteKey returns undefined for missing or empty credentials", () => {
   assert.equal(extractRouteKey({}), undefined);
   assert.equal(

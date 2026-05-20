@@ -58,6 +58,10 @@ export function extractRouteKey(headers: HeaderBag): string | undefined {
   }
 
   const token = authorization.slice(7).trim();
+  if (token.toLowerCase() === "dummy") {
+    return undefined;
+  }
+
   return token || undefined;
 }
 
