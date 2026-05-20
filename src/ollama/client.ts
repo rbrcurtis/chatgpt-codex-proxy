@@ -218,16 +218,23 @@ export class OllamaClient {
 
     const processSseLine = (line: string): void => {
       const trimmed = line.trim();
-      if (!trimmed.startsWith("data: ")) {
+      if (!trimmed.startsWith("data:")) {
         return;
       }
 
-      const payload = trimmed.slice(6).trim();
-      if (payload === "[DONE]") {
+      const rawPayload = trimmed.slice(5);
+      const payload = rawPayload.startsWith(" ") ? rawPayload.slice(1).trim() : rawPayload.trim();
+      if (payload === "" || payload === "[DONE]") {
         return;
       }
 
-      const parsed = JSON.parse(payload) as OpenAIStreamingResponse;
+      let parsed: OpenAIStreamingResponse;
+      try {
+        parsed = JSON.parse(payload) as OpenAIStreamingResponse;
+      } catch {
+        return;
+      }
+
       if (parsed.id) {
         responseId = parsed.id;
       }

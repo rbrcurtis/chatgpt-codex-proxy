@@ -115,6 +115,14 @@ test("createMessage throws a proxy error for non-ok upstream responses", async (
   }
 });
 
+function collectSseEvents(writer: string[]): string[] {
+  return writer
+    .join("")
+    .split("\n\n")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0 && entry !== "__end__");
+}
+
 test("streamMessage forwards stream=true and emits Anthropic SSE", async () => {
   const originalFetch = globalThis.fetch;
 
@@ -221,11 +229,7 @@ test("streamMessage forwards stream=true and emits Anthropic SSE", async () => {
     const forwardedBody = seen.body as { stream?: boolean };
     assert.equal(forwardedBody.stream, true);
 
-    const events = writer
-      .join("")
-      .split("\n\n")
-      .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0 && entry !== "__end__");
+    const events = collectSseEvents(writer);
 
     assert.deepEqual(events[0],
       `event: message_start\ndata: ${JSON.stringify({
@@ -306,6 +310,145 @@ test("streamMessage forwards stream=true and emits Anthropic SSE", async () => {
     const messageStop = `event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}`;
     assert.equal(events[8], messageDelta);
     assert.equal(events[9], messageStop);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("streamMessage ignores malformed SSE data and continues", async () => {
+  const originalFetch = globalThis.fetch;
+  const writer: string[] = [];
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const encoder = new TextEncoder();
+      controller.enqueue(encoder.encode("data: not-json\n"));
+      controller.enqueue(
+        encoder.encode(
+          `data: ${JSON.stringify({
+            id: "chatcmpl-good",
+            choices: [{ delta: { content: "ok" }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 1, completion_tokens: 2 },
+          })}\n`,
+        ),
+      );
+      controller.enqueue(encoder.encode("data: [DONE]\n"));
+      controller.close();
+    },
+  });
+
+  globalThis.fetch = (async () => new Response(stream, { status: 200 })) as typeof fetch;
+
+  const response = {
+    setHeader: () => undefined,
+    write: (chunk: string) => {
+      writer.push(chunk);
+      return true;
+    },
+    end: () => {
+      writer.push("__end__");
+    },
+  };
+
+  try {
+    const client = new OllamaClient();
+    await client.streamMessage(route, request({ stream: true }), response as unknown as ExpressResponse);
+
+    const events = collectSseEvents(writer);
+    assert.equal(events[0],
+      `event: message_start\ndata: ${JSON.stringify({
+        type: "message_start",
+        message: {
+          id: "chatcmpl-good",
+          type: "message",
+          role: "assistant",
+          model: "qwen3-coder-next",
+          content: [],
+          stop_reason: null,
+          usage: { input_tokens: 0, output_tokens: 0 },
+        },
+      })}`);
+    assert.equal(events[2],
+      `event: content_block_delta\ndata: ${JSON.stringify({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "ok" },
+      })}`);
+    assert.equal(events[4],
+      `event: message_delta\ndata: ${JSON.stringify({
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: { input_tokens: 1, output_tokens: 2 },
+      })}`);
+    assert.equal(events[5], `event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}`);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("streamMessage parses SSE data lines without a space after colon", async () => {
+  const originalFetch = globalThis.fetch;
+  const writer: string[] = [];
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const encoder = new TextEncoder();
+      controller.enqueue(
+        encoder.encode(
+          `data:${JSON.stringify({
+            id: "chatcmpl-nospace",
+            choices: [{ delta: { content: "compact" }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 4, completion_tokens: 6 },
+          })}\n`,
+        ),
+      );
+      controller.enqueue(encoder.encode("data:[DONE]\n"));
+      controller.close();
+    },
+  });
+
+  globalThis.fetch = (async () => new Response(stream, { status: 200 })) as typeof fetch;
+
+  const response = {
+    setHeader: () => undefined,
+    write: (chunk: string) => {
+      writer.push(chunk);
+      return true;
+    },
+    end: () => {
+      writer.push("__end__");
+    },
+  };
+
+  try {
+    const client = new OllamaClient();
+    await client.streamMessage(route, request({ stream: true }), response as unknown as ExpressResponse);
+
+    const events = collectSseEvents(writer);
+    assert.equal(events[0],
+      `event: message_start\ndata: ${JSON.stringify({
+        type: "message_start",
+        message: {
+          id: "chatcmpl-nospace",
+          type: "message",
+          role: "assistant",
+          model: "qwen3-coder-next",
+          content: [],
+          stop_reason: null,
+          usage: { input_tokens: 0, output_tokens: 0 },
+        },
+      })}`);
+    assert.equal(events[2],
+      `event: content_block_delta\ndata: ${JSON.stringify({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "compact" },
+      })}`);
+    assert.equal(events[4],
+      `event: message_delta\ndata: ${JSON.stringify({
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: { input_tokens: 4, output_tokens: 6 },
+      })}`);
+    assert.equal(events[5], `event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}`);
   } finally {
     globalThis.fetch = originalFetch;
   }
