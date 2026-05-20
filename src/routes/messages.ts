@@ -128,6 +128,11 @@ router.post(
       const backend = resolveBackendRoute(routeKey, routingConfig);
       console.log(`[chatgpt-codex-proxy] route key=${backend.routeKey} kind=${backend.route.kind} model=${body.model}`);
 
+      if (backend.route.kind === "ollama" && body.stream) {
+        await ollamaClient.streamMessage(backend.route, body, res);
+        return;
+      }
+
       const anthropicResponse =
         backend.route.kind === "ollama"
           ? await ollamaClient.createMessage(backend.route, body)
