@@ -15,10 +15,45 @@
  * [수정시 주의]
  * - 명령 이름을 바꾸면 package.json 스크립트나 사용자 사용법도 함께 수정해야 한다.
  */
-import { login, logout, getAuthStatus } from "./auth.js";
+import { ArgumentParser } from "argparse";
+import { login, logout, getAuthStatus, importCodexAuth } from "./auth.js";
+
+const parser = new ArgumentParser({
+  description: "ChatGPT Codex Proxy CLI",
+});
+
+const subparsers = parser.add_subparsers({
+  dest: "command",
+});
+
+subparsers.add_parser("login", {
+  help: "Start OAuth login flow",
+});
+
+subparsers.add_parser("logout", {
+  help: "Delete stored tokens",
+});
+
+subparsers.add_parser("status", {
+  help: "Check authentication status",
+});
+
+const importParser = subparsers.add_parser("import-codex-auth", {
+  help: "Import tokens from ~/.codex/auth.json",
+});
+importParser.add_argument("--path", {
+  help: "Path to Codex auth.json",
+});
+
+interface CliArgs {
+  command?: string;
+  path?: string;
+}
+
+const args = parser.parse_args() as CliArgs;
 
 async function main(): Promise<void> {
-  const command = process.argv[2];
+  const command = args.command;
 
   switch (command) {
     case "login": {
@@ -57,13 +92,22 @@ async function main(): Promise<void> {
       return;
     }
 
+    case "import-codex-auth": {
+      const tokens = importCodexAuth(args.path);
+      if (!tokens) {
+        process.exit(1);
+      }
+
+      console.log("Imported Codex auth into proxy token store");
+      console.log(`Expires: ${new Date(tokens.expires_at).toLocaleString()}`);
+      if (tokens.chatgpt_account_id) {
+        console.log(`Account ID: ${tokens.chatgpt_account_id}`);
+      }
+      return;
+    }
+
     default: {
-      console.log("ChatGPT Codex Proxy CLI");
-      console.log("");
-      console.log("Usage:");
-      console.log("  npm run login   - Start OAuth login flow");
-      console.log("  npm run logout  - Delete stored tokens");
-      console.log("  npm run status  - Check authentication status");
+      parser.print_help();
     }
   }
 }

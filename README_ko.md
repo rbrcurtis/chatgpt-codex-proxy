@@ -7,7 +7,7 @@
 ## 무엇인가?
 
 이 프록시는 Claude Code가 Anthropic API 대신 ChatGPT의 Codex 백엔드로 요청을 보낼 수 있게 합니다.
-`claude` 명령어, 슬래시 커맨드, MCP 툴, CLAUDE.md — 모든 것이 그대로 동작하고, 추론만 GPT가 처리합니다.
+`claude` 명령어와 기존 harness 흐름은 그대로 두고, 추론만 GPT가 처리합니다.
 
 ```
 Claude Code  ──POST /v1/messages──>  chatgpt-codex-proxy  ──POST /codex/responses──>  ChatGPT
@@ -21,7 +21,7 @@ Claude Code  ──POST /v1/messages──>  chatgpt-codex-proxy  ──POST /co
 | Anthropic 할당량 소진 / 속도 제한 | ✅ 환경변수 하나로 GPT로 전환 |
 | Claude Code를 벗어나지 않고 GPT 모델 사용해보기 | ✅ 동일한 워크플로우, 다른 백엔드 |
 | 놀고 있는 ChatGPT Plus/Pro 구독 활용 | ✅ API 키 비용 없음 |
-| MCP 툴(Stitch, Linear 등)을 GPT와 함께 사용 | ✅ 이 기능을 지원하는 유일한 프록시 |
+| harness가 보낸 툴을 GPT와 함께 사용 | ✅ 요청에 포함된 툴을 그대로 변환 |
 | 다른 클라이언트용 OpenAI 호환 엔드포인트 필요 | [ChatMock](https://github.com/RayBytes/ChatMock) 사용 권장 |
 | Ollama 호환 엔드포인트 필요 | [ChatMock](https://github.com/RayBytes/ChatMock) 사용 권장 |
 
@@ -32,7 +32,7 @@ Claude Code  ──POST /v1/messages──>  chatgpt-codex-proxy  ──POST /co
 **이 프록시**는 Claude Code를 위해 만들어졌습니다:
 
 - **워크플로우 변경 없음** — `claude` 명령어, 단축키, CLAUDE.md, 슬래시 커맨드가 모두 그대로 동작합니다.
-- **MCP 툴이 GPT까지 전달됨** — Claude Code의 MCP 서버(Stitch, Linear, Chrome DevTools 등)는 원래 Claude 백엔드에서만 사용 가능합니다. 이 프록시는 시작 시 `~/.claude.json`을 읽어 MCP 서버에 연결하고, 툴 스키마를 모든 GPT 요청에 주입합니다. GPT도 Claude와 동일한 툴 접근 권한을 갖게 됩니다.
+- **얇은 메시지 변환 계층** — proxy는 harness가 보낸 내용을 그대로 변환합니다. 히스토리 절단, context compaction, 툴 검색, 추가 툴 주입을 하지 않습니다.
 - **병렬 툴 호출 안전 처리** — 뮤테이팅 툴(Edit, Write, Delete, Bash)을 감지하면 자동으로 `parallel_tool_calls`를 비활성화해 파일 충돌을 방지합니다.
 - **Claude 모델명 그대로 사용** — `--model claude-sonnet-4-20250514`처럼 평소대로 지정하면 프록시가 자동으로 Codex 모델에 매핑합니다. 또는 passthrough 모드에서 GPT 모델명을 직접 지정할 수도 있습니다.
 
@@ -47,7 +47,6 @@ Claude Code  ──POST /v1/messages──>  chatgpt-codex-proxy  ──POST /co
 - 요청/응답 자동 변환 (Anthropic ↔ Codex)
 - SSE 스트리밍
 - Claude → Codex 모델 자동 매핑 (환경변수 오버라이드 지원)
-- **MCP 툴 주입** (아래 참조)
 
 ## 빠른 시작
 
@@ -93,48 +92,6 @@ gpt() {
   echo "Using local Codex proxy on :${proxy_port}"
   claude "$@"
 }
-```
-
-## MCP 툴 주입
-
-Claude Code의 MCP 툴은 원래 Claude 백엔드에서만 사용 가능합니다. 이 프록시는 그 간극을 메웁니다.
-
-```
-Claude Code                    chatgpt-codex-proxy                ChatGPT Codex API
-   │  tools: [Edit, Bash, ...]       │  tools: [Edit, Bash, ...       │
-   │  (deferred: stitch, qmd, ...)   │          + mcp__stitch__*      │
-   │                                 │          + mcp__qmd__*  ]      │
-   │ ───────────────────────────────>│ ─────────────────────────────> │
-```
-
-**동작 방식:**
-1. 시작 시 `~/.claude.json` → `mcpServers` 읽기
-2. 활성 서버마다 MCP 핸드셰이크(`initialize` → `tools/list`) 실행
-3. 스키마를 프로세스 생명주기 동안 메모리에 캐싱
-4. 매 `/v1/messages` 요청마다 캐시된 툴을 Codex `tools` 배열에 추가 (툴 이름: `mcp__서버명__툴명`)
-5. GPT가 툴을 호출하면 Claude Code가 `tool_use` 응답을 받아 실제 MCP 호출을 수행하고, 결과를 프록시를 통해 되돌려 줌
-
-HTTP(`type: http`)와 stdio(`command`) 방식 MCP 서버 모두 지원.
-
-**설정** — `.env`에서 `PROXY_MCP_SERVERS` 지정:
-
-```env
-# 특정 서버만 활성화 (이름은 ~/.claude.json의 키와 일치해야 함)
-PROXY_MCP_SERVERS=stitch,linear
-
-# ~/.claude.json에 등록된 모든 서버
-PROXY_MCP_SERVERS=all
-
-# 비활성화 (기본값)
-PROXY_MCP_SERVERS=
-```
-
-시작 시 로그:
-```
-[mcp-registry] connecting to: stitch, linear
-[mcp-registry] stitch: 8 tools loaded
-[mcp-registry] linear: 6 tools loaded
-[mcp-registry] ready: 14 total MCP tools
 ```
 
 ## 설정
@@ -243,7 +200,6 @@ PROXY_DEFAULT_EFFORT=high
 | `ANTHROPIC_DEFAULT_SONNET_MODEL` | - | Sonnet → Codex 모델 매핑 |
 | `ANTHROPIC_DEFAULT_OPUS_MODEL` | - | Opus → Codex 모델 매핑 |
 | `PROXY_DEFAULT_EFFORT` | _(자동)_ | `low` / `medium` / `high` / `xhigh` |
-| `PROXY_MCP_SERVERS` | _(비활성)_ | `all` 또는 `~/.claude.json` 키 이름(쉼표 구분) |
 
 ## 문제 해결
 
@@ -284,10 +240,6 @@ chatgpt-codex-proxy/
 │   ├── codex/
 │   │   ├── client.ts      # Codex API 클라이언트
 │   │   └── models.ts      # 모델 매핑
-│   ├── mcp/
-│   │   ├── config.ts      # ~/.claude.json MCP 서버 설정 읽기
-│   │   ├── client.ts      # HTTP + stdio MCP 클라이언트
-│   │   └── registry.ts    # 툴 스키마 캐시 (싱글턴)
 │   ├── types/
 │   │   └── anthropic.ts   # 타입 정의
 │   └── utils/

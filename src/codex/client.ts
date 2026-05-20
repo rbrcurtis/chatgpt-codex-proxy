@@ -197,14 +197,9 @@ export class CodexClient {
       throw new CodexApiError(parseErrorMessage(response.status, parsedBody), response.status, parsedBody);
     }
 
-    // Handle SSE stream
-    if (request.stream) {
-      return await this.parseSseResponse(response);
-    }
-
-    // Non-streaming: parse final response
-    const sseText = await response.text();
-    return this.parseFinalResponse(sseText);
+    // The backend responds as SSE here regardless of Anthropic stream mode.
+    // Use one parser path so text extracted from SSE item events is preserved.
+    return await this.parseSseResponse(response);
   }
 
   private async parseSseResponse(response: Response): Promise<CodexResponse> {
@@ -213,12 +208,70 @@ export class CodexClient {
     }
 
     const outputTextParts: string[] = [];
+    const outputTextDoneParts = new Map<string, string>();
+    const contentPartTexts = new Map<string, string>();
+    const outputItemTexts: string[] = [];
+    const fallbackOutputItems = new Map<string, CodexOutputItem>();
     let finalResponse: CodexResponse | null = null;
+
+    const appendUniqueText = (bucket: string[], text: unknown) => {
+      if (typeof text !== "string" || text.length === 0) return;
+      if (!bucket.includes(text)) bucket.push(text);
+    };
+
+    const extractMessageText = (
+      content: Array<{ type?: string; text?: string; refusal?: string }> | undefined
+    ): string => {
+      if (!Array.isArray(content)) return "";
+      return content
+        .map((part) => {
+          if (part.type === "output_text" && typeof part.text === "string") return part.text;
+          if (part.type === "refusal" && typeof part.refusal === "string") return part.refusal;
+          return "";
+        })
+        .filter(Boolean)
+        .join("");
+    };
+
+    const getOutputItemKey = (item: {
+      id?: string;
+      type?: string;
+      call_id?: string;
+      name?: string;
+    }): string => {
+      if (typeof item.id === "string" && item.id.length > 0) return item.id;
+      if (typeof item.call_id === "string" && item.call_id.length > 0) return `${item.type ?? "item"}:${item.call_id}`;
+      if (typeof item.name === "string" && item.name.length > 0) return `${item.type ?? "item"}:${item.name}`;
+      return randomUUID();
+    };
+
+    const upsertFallbackItem = (item: CodexOutputItem) => {
+      const key = getOutputItemKey(item);
+      const prev = fallbackOutputItems.get(key);
+      fallbackOutputItems.set(key, prev ? { ...prev, ...item } : item);
+    };
 
     for await (const event of parseSseStream(response.body)) {
       if (event.data === "[DONE]") break;
 
-      let parsed: { type?: string; delta?: string; response?: CodexResponse };
+      let parsed: {
+        type?: string;
+        delta?: string;
+        text?: string;
+        item_id?: string;
+        content_index?: number;
+        response?: CodexResponse;
+        item?: {
+          id?: string;
+          type?: string;
+          role?: string;
+          call_id?: string;
+          name?: string;
+          arguments?: string;
+          content?: Array<{ type?: string; text?: string; refusal?: string }>;
+        };
+        part?: { type?: string; text?: string; refusal?: string };
+      };
       try {
         parsed = JSON.parse(event.data);
       } catch {
@@ -226,8 +279,65 @@ export class CodexClient {
       }
 
       // Accumulate text deltas
-      if (parsed.type === "response.output_text.delta" && typeof parsed.delta === "string") {
+      if (
+        (parsed.type === "response.output_text.delta" || parsed.type === "response.refusal.delta") &&
+        typeof parsed.delta === "string"
+      ) {
         outputTextParts.push(parsed.delta);
+      }
+
+      if (
+        parsed.type === "response.output_text.done" &&
+        typeof parsed.text === "string" &&
+        typeof parsed.item_id === "string"
+      ) {
+        const key = `${parsed.item_id}:${parsed.content_index ?? 0}`;
+        outputTextDoneParts.set(key, parsed.text);
+      }
+
+      if (
+        (parsed.type === "response.content_part.added" || parsed.type === "response.content_part.done") &&
+        typeof parsed.item_id === "string"
+      ) {
+        const key = `${parsed.item_id}:${parsed.content_index ?? 0}`;
+        const text =
+          parsed.part?.type === "output_text"
+            ? parsed.part.text
+            : parsed.part?.type === "refusal"
+              ? parsed.part.refusal
+              : undefined;
+        if (typeof text === "string" && text.length > 0) {
+          contentPartTexts.set(key, text);
+        }
+      }
+
+      if (
+        (parsed.type === "response.output_item.added" || parsed.type === "response.output_item.done") &&
+        parsed.item?.type === "message"
+      ) {
+        appendUniqueText(outputItemTexts, extractMessageText(parsed.item.content));
+        upsertFallbackItem({
+          id: parsed.item.id,
+          type: "message",
+          role: parsed.item.role ?? "assistant",
+          content:
+            parsed.item.content
+              ?.filter((part): part is { type: string; text?: string; refusal?: string } => typeof part.type === "string")
+              .map((part) => ({ ...part })) ?? [],
+        });
+      }
+
+      if (
+        (parsed.type === "response.output_item.added" || parsed.type === "response.output_item.done") &&
+        parsed.item?.type === "function_call"
+      ) {
+        upsertFallbackItem({
+          id: parsed.item.id,
+          type: "function_call",
+          call_id: parsed.item.call_id,
+          name: parsed.item.name,
+          arguments: parsed.item.arguments,
+        });
       }
 
       // Capture final response
@@ -236,7 +346,49 @@ export class CodexClient {
       }
     }
 
+    const fallbackText =
+      outputItemTexts.find((text) => text.length > 0) ??
+      [...outputTextDoneParts.values()].find((text) => text.length > 0) ??
+      [...contentPartTexts.values()].find((text) => text.length > 0) ??
+      outputTextParts.join("");
+    const fallbackItems = [...fallbackOutputItems.values()];
+
     if (finalResponse) {
+      if (finalResponse.output.length === 0 && fallbackItems.length > 0) {
+        finalResponse.output = fallbackItems;
+      } else if (fallbackItems.length > 0) {
+        const existingKeys = new Set(finalResponse.output.map((item) => getOutputItemKey(item)));
+        for (const item of fallbackItems) {
+          const key = getOutputItemKey(item);
+          if (!existingKeys.has(key)) {
+            finalResponse.output.push(item);
+          }
+        }
+      }
+
+      const messageItem = finalResponse.output.find((item) => item.type === "message");
+      if (fallbackText && !messageItem) {
+        finalResponse.output = [
+          ...finalResponse.output,
+          {
+            role: "assistant",
+            type: "message",
+            content: [{ type: "output_text", text: fallbackText }],
+          },
+        ];
+        return finalResponse;
+      }
+
+      if (fallbackText && messageItem) {
+        messageItem.content ??= [];
+        const outputTextContent = messageItem.content.find((part) => part.type === "output_text");
+        if (!outputTextContent) {
+          messageItem.content.push({ type: "output_text", text: fallbackText });
+        } else if (typeof outputTextContent.text !== "string" || outputTextContent.text.length === 0) {
+          outputTextContent.text = fallbackText;
+        }
+      }
+
       return finalResponse;
     }
 
@@ -244,35 +396,16 @@ export class CodexClient {
     return {
       id: randomUUID(),
       model: "codex",
-      output: [
-        {
-          role: "assistant",
-          type: "message",
-          content: [{ type: "output_text", text: outputTextParts.join("") }],
-        },
-      ],
+      output: fallbackItems.length > 0
+        ? fallbackItems
+        : [
+            {
+              role: "assistant",
+              type: "message",
+              content: [{ type: "output_text", text: fallbackText }],
+            },
+          ],
       stop_reason: "end_turn",
     };
-  }
-
-  private parseFinalResponse(sseText: string): CodexResponse {
-    const lines = sseText.split("\n");
-
-    for (const line of lines) {
-      if (line.startsWith("data: ")) {
-        try {
-          const data = JSON.parse(line.slice(6));
-
-          // Look for response.done event
-          if (data.type === "response.done" || data.type === "response.completed") {
-            return data.response as CodexResponse;
-          }
-        } catch {
-          // Skip malformed JSON
-        }
-      }
-    }
-
-    throw new CodexApiError("Failed to parse Codex SSE response", 502);
   }
 }

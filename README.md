@@ -7,7 +7,7 @@
 ## What is this?
 
 This proxy lets Claude Code talk to ChatGPT's Codex backend instead of Anthropic's API.
-You keep using `claude` exactly as before — same UI, same slash commands, same MCP tools — while inference is served by GPT.
+You keep using `claude` exactly as before while inference is served by GPT.
 
 ```
 Claude Code  ──POST /v1/messages──>  chatgpt-codex-proxy  ──POST /codex/responses──>  ChatGPT
@@ -21,7 +21,7 @@ Claude Code  ──POST /v1/messages──>  chatgpt-codex-proxy  ──POST /co
 | Anthropic quota exhausted / rate limited | ✅ Switch to GPT with one env var |
 | Want to try GPT models without leaving Claude Code | ✅ Same workflow, different backend |
 | Have ChatGPT Plus/Pro idle and want to make use of it | ✅ No API key cost |
-| Need MCP tools (Stitch, Linear, etc.) to work with GPT | ✅ Only proxy that bridges this |
+| Need harness-owned tools to work with GPT | ✅ Tools sent by the harness are translated |
 | Need an OpenAI-compatible endpoint for other clients | Use [ChatMock](https://github.com/RayBytes/ChatMock) instead |
 | Need Ollama compatibility | Use [ChatMock](https://github.com/RayBytes/ChatMock) instead |
 
@@ -32,7 +32,7 @@ Claude Code  ──POST /v1/messages──>  chatgpt-codex-proxy  ──POST /co
 **This proxy** is built specifically for Claude Code:
 
 - **Zero workflow change** — `claude` command, keybindings, CLAUDE.md, slash commands, all work unchanged.
-- **MCP tools cross the boundary** — Claude Code's MCP servers (Stitch, Linear, Chrome DevTools, etc.) are normally only available to Claude's backend. This proxy reads `~/.claude.json` at startup, connects to your MCP servers, and injects their tool schemas into every GPT request. GPT gets the same tool access Claude would have.
+- **Thin message translation** — the proxy translates exactly what the harness sends. It does not slice history, compact context, discover tools, or inject extra tool schemas.
 - **Parallel tool call safety** — the proxy detects mutating tools (Edit, Write, Delete, Bash) and automatically disables `parallel_tool_calls` to prevent unsafe concurrent file operations.
 - **Claude model name passthrough** — use `--model claude-sonnet-4-20250514` as usual; the proxy maps it to the right Codex model automatically. Or use GPT model names directly in passthrough mode.
 
@@ -47,7 +47,6 @@ Claude Code  ──POST /v1/messages──>  chatgpt-codex-proxy  ──POST /co
 - Full request/response transformation (Anthropic ↔ Codex)
 - SSE streaming
 - Claude → Codex model mapping with env overrides
-- **MCP tool injection** (see below)
 
 ## Quick start
 
@@ -93,48 +92,6 @@ gpt() {
   echo "Using local Codex proxy on :${proxy_port}"
   claude "$@"
 }
-```
-
-## MCP tool injection
-
-Claude Code's MCP tools are normally invisible to non-Claude backends. This proxy bridges that gap.
-
-```
-Claude Code                   chatgpt-codex-proxy               ChatGPT Codex API
-   │  tools: [Edit, Bash, ...]      │  tools: [Edit, Bash, ...        │
-   │  (deferred: stitch, qmd, ...)  │          + mcp__stitch__*       │
-   │                                │          + mcp__qmd__*  ]       │
-   │ ──────────────────────────────>│ ──────────────────────────────> │
-```
-
-**How it works:**
-1. On startup: reads `~/.claude.json` → `mcpServers`
-2. Runs MCP handshake (`initialize` → `tools/list`) for each enabled server
-3. Caches schemas in memory for the lifetime of the proxy process
-4. On every `/v1/messages` request: appends cached tools to the Codex `tools` array
-5. When GPT calls a tool: Claude Code receives the `tool_use` response, executes the real MCP call, and sends the result back through the proxy
-
-Both HTTP (`type: http`) and stdio (`command`) MCP servers are supported.
-
-**Configuration** — set `PROXY_MCP_SERVERS` in `.env`:
-
-```env
-# Specific servers (names must match keys in ~/.claude.json)
-PROXY_MCP_SERVERS=stitch,linear
-
-# All servers registered in ~/.claude.json
-PROXY_MCP_SERVERS=all
-
-# Disabled (default)
-PROXY_MCP_SERVERS=
-```
-
-Startup log:
-```
-[mcp-registry] connecting to: stitch, linear
-[mcp-registry] stitch: 8 tools loaded
-[mcp-registry] linear: 6 tools loaded
-[mcp-registry] ready: 14 total MCP tools
 ```
 
 ## Configuration
@@ -242,7 +199,6 @@ Priority: `thinking.budget_tokens` in request → model name suffix/table → `P
 | `ANTHROPIC_DEFAULT_SONNET_MODEL` | - | Codex model for Sonnet requests |
 | `ANTHROPIC_DEFAULT_OPUS_MODEL` | - | Codex model for Opus requests |
 | `PROXY_DEFAULT_EFFORT` | _(auto)_ | `low` / `medium` / `high` / `xhigh` |
-| `PROXY_MCP_SERVERS` | _(disabled)_ | `all` or comma-separated server names from `~/.claude.json` |
 
 ## Troubleshooting
 
@@ -283,10 +239,6 @@ chatgpt-codex-proxy/
 │   ├── codex/
 │   │   ├── client.ts      # Codex API client
 │   │   └── models.ts      # Model mapping
-│   ├── mcp/
-│   │   ├── config.ts      # Read ~/.claude.json MCP server configs
-│   │   ├── client.ts      # HTTP + stdio MCP clients
-│   │   └── registry.ts    # Tool schema cache (singleton)
 │   ├── types/
 │   │   └── anthropic.ts   # Types
 │   └── utils/

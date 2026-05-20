@@ -17,18 +17,10 @@
  */
 import dotenv from "dotenv";
 import app from "./server.js";
-import { mcpToolRegistry } from "./mcp/registry.js";
 
 dotenv.config();
 
 const PORT = Number(process.env.PORT ?? 19080);
-
-/*
-MCP 레지스트리를 먼저 초기화한 뒤 HTTP 서버를 시작한다.
-PROXY_MCP_SERVERS 미설정 시 즉시 완료(논블로킹).
-설정된 경우 서버당 최대 20초 타임아웃으로 스키마를 수집한다.
-*/
-await mcpToolRegistry.initialize();
 
 app.listen(PORT, () => {
   // eslint-disable-next-line no-console

@@ -24,7 +24,6 @@ import { transformAnthropicToCodex } from "../transformers/request.js";
 import { transformCodexToAnthropic } from "../transformers/response.js";
 import type { AnthropicRequest, AnthropicResponse } from "../types/anthropic.js";
 import { ProxyError } from "../utils/errors.js";
-import { mcpToolRegistry } from "../mcp/registry.js";
 
 const router = Router();
 const codexClient = new CodexClient();
@@ -71,21 +70,6 @@ router.post(
 
       // Transform and call Codex
       const codexRequest = transformAnthropicToCodex(body);
-
-      /*
-      MCP 툴 주입: 레지스트리에 캐시된 MCP 툴을 Codex 요청에 추가한다.
-      deferred tools 는 anthropic.tools 배열에 포함되지 않으므로 중복 없이 주입 가능.
-      이름이 이미 존재하는 툴은 건너뛴다(Claude Code가 직접 전달한 툴 우선).
-      */
-      const mcpTools = mcpToolRegistry.getTools();
-      if (mcpTools.length > 0) {
-        const existingNames = new Set((codexRequest.tools ?? []).map((t) => t.name));
-        const newMcpTools = mcpTools.filter((t) => !existingNames.has(t.name));
-        if (newMcpTools.length > 0) {
-          codexRequest.tools = [...(codexRequest.tools ?? []), ...newMcpTools];
-          codexRequest.tool_choice = codexRequest.tool_choice ?? "auto";
-        }
-      }
 
       const inboundParallel = body.parallel_tool_calls;
       const inboundToolCount = body.tools?.length ?? 0;
@@ -234,10 +218,6 @@ router.post(
       }
 
       if (error instanceof Error) {
-        // Handle tool limit errors as 400 Bad Request
-        if (error.message.startsWith("Too many tools")) {
-          return next(new ProxyError(error.message, 400, "invalid_request_error"));
-        }
         return next(
           new ProxyError(
             `Unhandled proxy error: ${error.message}`,

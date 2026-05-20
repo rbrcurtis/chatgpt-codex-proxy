@@ -43,6 +43,7 @@ export interface TokenData {
 }
 
 const TOKEN_FILE = join(homedir(), ".chatgpt-codex-proxy", "tokens.json");
+const CODEX_AUTH_FILE = join(homedir(), ".codex", "auth.json");
 
 /**
  * Generate random state for CSRF protection
@@ -108,6 +109,59 @@ export function saveTokens(tokens: TokenData): void {
     mkdirSync(dir, { recursive: true });
   }
   writeFileSync(TOKEN_FILE, JSON.stringify(tokens, null, 2), "utf-8");
+}
+
+/**
+ * Import tokens from the Codex CLI auth store.
+ */
+export function importCodexAuth(codexAuthFile = CODEX_AUTH_FILE): TokenData | null {
+  try {
+    if (!existsSync(codexAuthFile)) {
+      console.error(`[chatgpt-codex-proxy] Codex auth file not found: ${codexAuthFile}`);
+      return null;
+    }
+
+    const data = JSON.parse(readFileSync(codexAuthFile, "utf-8")) as unknown;
+    if (!data || typeof data !== "object" || !("tokens" in data)) {
+      console.error("[chatgpt-codex-proxy] Codex auth file missing tokens");
+      return null;
+    }
+
+    const tokens = data.tokens;
+    if (!tokens || typeof tokens !== "object") {
+      console.error("[chatgpt-codex-proxy] Codex auth tokens are invalid");
+      return null;
+    }
+
+    const accessToken = "access_token" in tokens ? tokens.access_token : undefined;
+    const refreshToken = "refresh_token" in tokens ? tokens.refresh_token : undefined;
+    if (typeof accessToken !== "string" || typeof refreshToken !== "string") {
+      console.error("[chatgpt-codex-proxy] Codex auth tokens missing access_token or refresh_token");
+      return null;
+    }
+
+    const decoded = decodeJWT(accessToken);
+    const exp = decoded?.exp;
+    if (typeof exp !== "number") {
+      console.error("[chatgpt-codex-proxy] Codex access token missing numeric exp claim");
+      return null;
+    }
+
+    const auth = decoded?.["https://api.openai.com/auth"] as { chatgpt_account_id?: unknown } | undefined;
+    const accountId = auth?.chatgpt_account_id;
+    const proxyTokens: TokenData = {
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      expires_at: exp * 1000,
+      ...(typeof accountId === "string" ? { chatgpt_account_id: accountId } : {}),
+    };
+
+    saveTokens(proxyTokens);
+    return proxyTokens;
+  } catch (err) {
+    console.error("[chatgpt-codex-proxy] Failed to import Codex auth:", err instanceof Error ? err.message : String(err));
+    return null;
+  }
 }
 
 /**

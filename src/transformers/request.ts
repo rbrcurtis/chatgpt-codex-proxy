@@ -5,7 +5,7 @@ Anthropic Messages API 요청(AnthropicRequest)을 Codex Responses API 요청(Co
 [주요 흐름]
 1. 모델명 매핑(Anthropic → Codex) 및 reasoning effort 산정
 2. system/messages/tools/tool_choice 등 입력을 Codex 스키마에 맞게 정규화
-3. Codex 호환성 제약(도구/메시지 개수, parallel tool calls 등)을 적용
+3. Anthropic tool 사용/결과 블록을 Codex function_call/function_call_output으로 변환
 
 [외부 연결]
 - codex/models(mapAnthropicModelToCodex, getEffortForModel)
@@ -14,7 +14,7 @@ Anthropic Messages API 요청(AnthropicRequest)을 Codex Responses API 요청(Co
 [수정시 주의]
 - tools/tool_choice/parallel_tool_calls 정규화는 모델의 도구 호출 행동에 직접 영향
 - message/tool_result/tool_use 변환 규칙을 바꾸면 대화/툴 실행 연결(call_id)이 깨질 수 있음
-- 제한값(메시지/툴 개수)을 바꾸면 400/호환성 문제가 발생할 수 있음
+- 이 프록시는 대화 기록/툴 목록을 줄이지 않는다. compaction/선택 정책은 호출 harness 책임이다.
 */
 import { mapAnthropicModelToCodex, getEffortForModel } from "../codex/models.js";
 import type {
@@ -91,35 +91,6 @@ const MUTATING_TOOL_NAME_PATTERNS = [
   /(^|[_-])rename($|[_-])/i,
 ];
 
-// Tool priority for Codex compatibility
-const TOOL_PRIORITY: Record<string, number> = {
-  // Tier 1: Core execution tools
-  Agent: 1,
-  Bash: 1,
-  Read: 1,
-  Edit: 1,
-  Write: 1,
-  Glob: 1,
-  Grep: 1,
-  WebSearch: 1,
-  WebFetch: 1,
-  // Tier 2: Planning & task management
-  ExitPlanMode: 2,
-  EnterPlanMode: 2,
-  Skill: 2,
-  TaskCreate: 2,
-  TaskUpdate: 2,
-  TaskList: 2,
-  AskUserQuestion: 2,
-  // Tier 3: Supporting tools
-  TaskOutput: 3,
-  TaskStop: 3,
-  TaskGet: 3,
-  EnterWorktree: 3,
-  NotebookEdit: 3,
-  SendMessage: 3,
-};
-
 /*
 [목적]
 도구 이름만 보고(휴리스틱) "상태를 바꾸는(mutating)" 성격의 도구인지 판단한다.
@@ -145,40 +116,6 @@ Codex에서 parallel_tool_calls를 그대로 허용하면, 이런 도구들이 �
 */
 function isMutatingToolName(name: string): boolean {
   return MUTATING_TOOL_NAME_PATTERNS.some((pattern) => pattern.test(name));
-}
-
-/*
-[목적]
-Codex 호환성을 위해 tools 개수가 과도할 때, 중요도가 높은 도구를 우선적으로 남긴다.
-
-[입력]
-- tools: Codex로 전달 가능한 tool 목록(이미 Anthropic→Codex로 매핑된 상태)
-- maxCount: 유지할 최대 도구 수
-
-[출력]
-- 우선순위(TOOL_PRIORITY) 기준으로 정렬 후 maxCount 만큼 잘린 tool 배열
-
-[연결]
-- TOOL_PRIORITY: 도구 이름별 우선순위 테이블
-- transformAnthropicToCodex: tools가 너무 많을 때 이 함수를 호출
-
-[주의]
-- 잘려나간 도구는 모델이 호출할 수 없으므로, 도구 호출 성공률/행동이 달라질 수 있음
-- 동일 우선순위 내에서는 원래 순서를 유지(예상 가능성 유지)
-
-[수정시 영향]
-- 도구 선택/툴 호출 계획(tool plan)이 달라져 통합 테스트/스모크 테스트 결과가 변할 수 있음
-*/
-function filterToolsByPriority(tools: CodexTool[], maxCount: number): CodexTool[] {
-  // Sort by priority (lower number = higher priority)
-  const sorted = [...tools].sort((a, b) => {
-    const priorityA = TOOL_PRIORITY[a.name] ?? 999;
-    const priorityB = TOOL_PRIORITY[b.name] ?? 999;
-    if (priorityA !== priorityB) return priorityA - priorityB;
-    return tools.indexOf(a) - tools.indexOf(b); // maintain original order for same priority
-  });
-
-  return sorted.slice(0, maxCount);
 }
 
 /*
@@ -406,8 +343,7 @@ function extractSystemPrompt(system: string | ContentBlock[] | undefined): strin
 /*
 [목적]
 Anthropic Messages API 요청을 Codex Responses API 요청으로 변환한다.
-프로토콜 차이(도구 스키마, tool_choice 값, 입력 아이템 구조)를 흡수하고,
-Codex 호환성 제한(메시지/도구 수, 병렬 툴 호출)을 적용한다.
+프로토콜 차이(도구 스키마, tool_choice 값, 입력 아이템 구조)를 흡수한다.
 
 [입력]
 - anthropic: 클라이언트가 보낸 AnthropicRequest
@@ -419,10 +355,10 @@ Codex 호환성 제한(메시지/도구 수, 병렬 툴 호출)을 적용한다.
 - mapAnthropicModelToCodex/getEffortForModel: 모델/추론 설정 매핑
 - contentToInputItems: messages → input 변환
 - mapAnthropicToolToCodexTool/mapToolChoice: tools/tool_choice 매핑
-- shouldDisableParallelToolCalls/filterToolsByPriority: 호환성/안전 제약 적용
+- shouldDisableParallelToolCalls: 안전 제약 적용
 
 [주의]
-- messages/tools 제한 로직은 "정확성"보다 "호환성"을 우선하는 절충임
+- messages/tools 는 호출자가 보낸 값을 그대로 변환한다. compaction/선택 정책은 호출 harness 책임이다.
 - tool_choice 기본값은 tools 존재 여부에 따라 달라짐("auto" 기본)
 
 [수정시 영향]
@@ -435,23 +371,12 @@ export function transformAnthropicToCodex(anthropic: AnthropicRequest): CodexReq
 
   const systemInstruction = extractSystemPrompt(anthropic.system);
 
-  // Filter messages if too many (Codex compatibility)
-  let messages = anthropic.messages ?? [];
-  if (messages.length > 50) {
-    messages = messages.slice(-20); // Keep only last 20 messages
-  }
-
   const input: CodexInputItem[] = [];
-  for (const msg of messages) {
+  for (const msg of anthropic.messages ?? []) {
     input.push(...contentToInputItems(msg.role, msg.content));
   }
 
-  let tools = anthropic.tools?.map(mapAnthropicToolToCodexTool);
-
-  // Codex compatibility: filter tools by priority if too many
-  if (tools && tools.length > 50) {
-    tools = filterToolsByPriority(tools, 30);
-  }
+  const tools = anthropic.tools?.map(mapAnthropicToolToCodexTool);
 
   const hasTools = !!(tools && tools.length > 0);
   const toolChoice = mapToolChoice(anthropic.tool_choice, hasTools);
