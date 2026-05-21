@@ -8,6 +8,7 @@ export interface CodexBackendRoute {
 export interface OllamaBackendRoute {
   kind: "ollama";
   baseUrl: string;
+  model?: string;
 }
 
 export type BackendRoute = CodexBackendRoute | OllamaBackendRoute;
@@ -66,15 +67,23 @@ export function extractRouteKey(headers: HeaderBag): string | undefined {
 }
 
 const FALLBACK_BASE_URL = "http://max.local:11434";
+const FALLBACK_SUBAGENT_MODEL = "qwen3-coder:30b-a3b-q8_0";
 
 function fallbackRoutingConfig(env: NodeJS.ProcessEnv): RoutingConfig {
+  const baseUrl = (env.MAX_OLLAMA_BASE_URL ?? FALLBACK_BASE_URL).replace(/\/+$/, "");
+
   return {
     defaultRoute: "codex",
     routes: {
       codex: { kind: "codex" },
       max: {
         kind: "ollama",
-        baseUrl: (env.MAX_OLLAMA_BASE_URL ?? FALLBACK_BASE_URL).replace(/\/+$/, ""),
+        baseUrl,
+      },
+      "max-subagent": {
+        kind: "ollama",
+        baseUrl,
+        model: FALLBACK_SUBAGENT_MODEL,
       },
     },
   };
@@ -117,7 +126,7 @@ export function loadRoutingConfigFromEnv(env: NodeJS.ProcessEnv = process.env): 
       throw new Error(`Invalid PROXY_ROUTES_JSON: route "${routeKey}" must be an object`);
     }
 
-    const typedRoute = routeValue as { kind?: unknown; baseUrl?: unknown };
+    const typedRoute = routeValue as { kind?: unknown; baseUrl?: unknown; model?: unknown };
     if (typedRoute.kind === "codex") {
       routes[routeKey] = { kind: "codex" };
       continue;
@@ -129,9 +138,14 @@ export function loadRoutingConfigFromEnv(env: NodeJS.ProcessEnv = process.env): 
           `Invalid PROXY_ROUTES_JSON: route "${routeKey}" has invalid baseUrl for ollama`
         );
       }
+      const model = typeof typedRoute.model === "string" && typedRoute.model.trim() !== ""
+        ? typedRoute.model.trim()
+        : undefined;
+
       routes[routeKey] = {
         kind: "ollama",
         baseUrl: typedRoute.baseUrl.replace(/\/+$/, ""),
+        ...(model ? { model } : {}),
       };
       continue;
     }

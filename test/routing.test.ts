@@ -99,3 +99,33 @@ test("resolveBackendRoute rejects unknown keys", () => {
     /Unknown proxy route key "unknown"/,
   );
 });
+
+test("loadRoutingConfigFromEnv includes max-subagent fallback route with forced model", () => {
+  const config = loadRoutingConfigFromEnv({
+    MAX_OLLAMA_BASE_URL: "http://custom.max/",
+  });
+
+  assert.equal(config.routes["max-subagent"].kind, "ollama");
+  if (config.routes["max-subagent"].kind !== "ollama") {
+    throw new Error("max-subagent route should be ollama");
+  }
+
+  assert.equal(config.routes["max-subagent"].baseUrl, "http://custom.max");
+  assert.equal(config.routes["max-subagent"].model, "qwen3-coder:30b-a3b-q8_0");
+});
+
+test("loadRoutingConfigFromEnv parses optional ollama route model override", () => {
+  const config = loadRoutingConfigFromEnv({
+    PROXY_ROUTES_JSON:
+      '{"defaultRoute":"codex","routes":{"codex":{"kind":"codex"},"worker":{"kind":"ollama","baseUrl":"http://max.local/","model":"qwen3-coder:30b-a3b-q8_0"}}}',
+  });
+
+  const route = config.routes.worker;
+  assert.equal(route.kind, "ollama");
+  if (route.kind !== "ollama") {
+    throw new Error("worker route should be ollama");
+  }
+
+  assert.equal(route.baseUrl, "http://max.local");
+  assert.equal(route.model, "qwen3-coder:30b-a3b-q8_0");
+});
