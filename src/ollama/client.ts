@@ -72,14 +72,26 @@ function writeSseEvent(res: ExpressResponse, event: string, data: unknown): void
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
+function applyRouteModel(route: OllamaBackendRoute, body: AnthropicRequest): AnthropicRequest {
+  if (!route.model) {
+    return body;
+  }
+
+  return {
+    ...body,
+    model: route.model,
+  };
+}
+
 export class OllamaClient {
   async createMessage(route: OllamaBackendRoute, body: AnthropicRequest): Promise<AnthropicResponse> {
+    const effectiveBody = applyRouteModel(route, body);
     const res = await fetch(`${route.baseUrl}/v1/chat/completions`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
       },
-      body: JSON.stringify(transformAnthropicToOllamaChat({ ...body, stream: false })),
+      body: JSON.stringify(transformAnthropicToOllamaChat({ ...effectiveBody, stream: false })),
     });
 
     if (!res.ok) {
@@ -92,16 +104,17 @@ export class OllamaClient {
     }
 
     const json = (await res.json()) as OpenAIChatCompletionResponse;
-    return transformOllamaChatToAnthropic(json, body.model);
+    return transformOllamaChatToAnthropic(json, effectiveBody.model);
   }
 
   async streamMessage(route: OllamaBackendRoute, body: AnthropicRequest, res: ExpressResponse): Promise<void> {
+    const effectiveBody = applyRouteModel(route, body);
     const upstreamRes = await fetch(`${route.baseUrl}/v1/chat/completions`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
       },
-      body: JSON.stringify(transformAnthropicToOllamaChat({ ...body, stream: true })),
+      body: JSON.stringify(transformAnthropicToOllamaChat({ ...effectiveBody, stream: true })),
     });
 
     if (!upstreamRes.ok) {
@@ -130,7 +143,7 @@ export class OllamaClient {
     let usage: OpenAIStreamingUsage = {};
     let finishReason: string | undefined;
     let responseId = "chatcmpl-unknown";
-    let responseModel = body.model;
+    let responseModel = effectiveBody.model;
     let messageStartSent = false;
 
     const sendMessageStart = () => {

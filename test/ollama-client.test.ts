@@ -385,6 +385,121 @@ test("streamMessage ignores malformed SSE data and continues", async () => {
   }
 });
 
+test("createMessage uses route model override for upstream ollama request", async () => {
+  const calls: Array<{ url: string; body: unknown }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url, init) => {
+    calls.push({
+      url: String(url),
+      body: JSON.parse(String(init?.body)),
+    });
+
+    return new Response(
+      JSON.stringify({
+        id: "chatcmpl-forced-model",
+        model: "qwen3-coder:30b-a3b-q8_0",
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: "forced model ok" },
+            finish_reason: "stop",
+          },
+        ],
+        usage: { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const client = new OllamaClient();
+    const response = await client.createMessage(
+      {
+        kind: "ollama",
+        baseUrl: "http://max.local:11434",
+        model: "qwen3-coder:30b-a3b-q8_0",
+      },
+      {
+        model: "claude-subagent-placeholder",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hello" }],
+      } as AnthropicRequest,
+    );
+
+    assert.equal(calls.length, 1);
+    assert.equal((calls[0].body as { model: string }).model, "qwen3-coder:30b-a3b-q8_0");
+    assert.equal(response.model, "qwen3-coder:30b-a3b-q8_0");
+    assert.deepEqual(response.content, [{ type: "text", text: "forced model ok" }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("streamMessage uses route model override for upstream ollama request", async () => {
+  const calls: Array<{ url: string; body: unknown }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url, init) => {
+    calls.push({
+      url: String(url),
+      body: JSON.parse(String(init?.body)),
+    });
+
+    const stream = new ReadableStream({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(
+          encoder.encode(
+            'data: {"id":"chatcmpl-stream-forced","model":"qwen3-coder:30b-a3b-q8_0","choices":[{"delta":{"content":"SUBAGENT_STREAM_OK"}}]}\n\n',
+          ),
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4}}\n\n',
+          ),
+        );
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+
+    return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+  }) as typeof fetch;
+
+  try {
+    const client = new OllamaClient();
+    const chunks: string[] = [];
+    const res = {
+      setHeader() {},
+      write(chunk: string) {
+        chunks.push(chunk);
+      },
+      end() {},
+    } as unknown as ExpressResponse;
+
+    await client.streamMessage(
+      {
+        kind: "ollama",
+        baseUrl: "http://max.local:11434",
+        model: "qwen3-coder:30b-a3b-q8_0",
+      },
+      {
+        model: "claude-subagent-placeholder",
+        max_tokens: 16,
+        stream: true,
+        messages: [{ role: "user", content: "hello" }],
+      } as AnthropicRequest,
+      res,
+    );
+
+    assert.equal(calls.length, 1);
+    assert.equal((calls[0].body as { model: string }).model, "qwen3-coder:30b-a3b-q8_0");
+    assert.match(chunks.join(""), /qwen3-coder:30b-a3b-q8_0/);
+    assert.match(chunks.join(""), /SUBAGENT_STREAM_OK/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("streamMessage parses SSE data lines without a space after colon", async () => {
   const originalFetch = globalThis.fetch;
   const writer: string[] = [];
