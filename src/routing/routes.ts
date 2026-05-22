@@ -5,13 +5,14 @@ export interface CodexBackendRoute {
   kind: "codex";
 }
 
-export interface OllamaBackendRoute {
-  kind: "ollama";
+export interface OpenAICompatibleBackendRoute {
+  kind: "openai-compatible";
   baseUrl: string;
   model?: string;
+  apiKey?: string;
 }
 
-export type BackendRoute = CodexBackendRoute | OllamaBackendRoute;
+export type BackendRoute = CodexBackendRoute | OpenAICompatibleBackendRoute;
 
 export interface RoutingConfig {
   defaultRoute: string;
@@ -66,24 +67,20 @@ export function extractRouteKey(headers: HeaderBag): string | undefined {
   return token || undefined;
 }
 
-const FALLBACK_BASE_URL = "http://max.local:11434";
-const FALLBACK_SUBAGENT_MODEL = "qwen3-coder:30b-a3b-q8_0";
+const FALLBACK_MAX_MLX_BASE_URL = "http://max.local:8000";
 
 function fallbackRoutingConfig(env: NodeJS.ProcessEnv): RoutingConfig {
-  const baseUrl = (env.MAX_OLLAMA_BASE_URL ?? FALLBACK_BASE_URL).replace(/\/+$/, "");
+  const baseUrl = (env.MAX_MLX_BASE_URL ?? FALLBACK_MAX_MLX_BASE_URL).replace(/\/+$/, "");
+  const apiKey = env.MAX_MLX_API_KEY?.trim();
 
   return {
     defaultRoute: "codex",
     routes: {
       codex: { kind: "codex" },
       max: {
-        kind: "ollama",
+        kind: "openai-compatible",
         baseUrl,
-      },
-      "max-subagent": {
-        kind: "ollama",
-        baseUrl,
-        model: FALLBACK_SUBAGENT_MODEL,
+        ...(apiKey ? { apiKey } : {}),
       },
     },
   };
@@ -126,26 +123,30 @@ export function loadRoutingConfigFromEnv(env: NodeJS.ProcessEnv = process.env): 
       throw new Error(`Invalid PROXY_ROUTES_JSON: route "${routeKey}" must be an object`);
     }
 
-    const typedRoute = routeValue as { kind?: unknown; baseUrl?: unknown; model?: unknown };
+    const typedRoute = routeValue as { kind?: unknown; baseUrl?: unknown; model?: unknown; apiKey?: unknown };
     if (typedRoute.kind === "codex") {
       routes[routeKey] = { kind: "codex" };
       continue;
     }
 
-    if (typedRoute.kind === "ollama") {
+    if (typedRoute.kind === "openai-compatible") {
       if (typeof typedRoute.baseUrl !== "string" || typedRoute.baseUrl.trim() === "") {
         throw new Error(
-          `Invalid PROXY_ROUTES_JSON: route "${routeKey}" has invalid baseUrl for ollama`
+          `Invalid PROXY_ROUTES_JSON: route "${routeKey}" has invalid baseUrl for ${typedRoute.kind}`
         );
       }
       const model = typeof typedRoute.model === "string" && typedRoute.model.trim() !== ""
         ? typedRoute.model.trim()
         : undefined;
+      const apiKey = typeof typedRoute.apiKey === "string" && typedRoute.apiKey.trim() !== ""
+        ? typedRoute.apiKey.trim()
+        : undefined;
 
       routes[routeKey] = {
-        kind: "ollama",
+        kind: "openai-compatible",
         baseUrl: typedRoute.baseUrl.replace(/\/+$/, ""),
         ...(model ? { model } : {}),
+        ...(apiKey ? { apiKey } : {}),
       };
       continue;
     }

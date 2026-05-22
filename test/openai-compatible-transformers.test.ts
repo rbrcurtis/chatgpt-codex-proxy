@@ -2,11 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  transformAnthropicToOllamaChat,
-  transformOllamaChatToAnthropic,
-} from "../src/ollama/transformers.js";
+  transformAnthropicToOpenAIChat,
+  transformOpenAIChatToAnthropic,
+} from "../src/openai-compatible/transformers.js";
 import type { AnthropicRequest } from "../src/types/anthropic.js";
-import type { OpenAIChatCompletionResponse } from "../src/ollama/types.js";
+import type { OpenAIChatCompletionResponse } from "../src/openai-compatible/types.js";
 
 const sampleModel = "qwen3-coder-next";
 
@@ -32,7 +32,7 @@ test("transforms basic system/user/text settings", () => {
     max_tokens: 1024,
   });
 
-  const transformed = transformAnthropicToOllamaChat(request);
+  const transformed = transformAnthropicToOpenAIChat(request);
 
   assert.equal(transformed.model, sampleModel);
   assert.equal(transformed.stream, true);
@@ -63,7 +63,7 @@ test("maps anthropic tools to openai function tools", () => {
     messages: [{ role: "user", content: "run" }],
   });
 
-  const transformed = transformAnthropicToOllamaChat(request);
+  const transformed = transformAnthropicToOpenAIChat(request);
 
   assert.deepEqual(transformed.tools, [
     {
@@ -92,11 +92,11 @@ test("maps tool choice any to required and tool-specific choice", () => {
     messages: [],
   });
 
-  const transformed = transformAnthropicToOllamaChat(request);
+  const transformed = transformAnthropicToOpenAIChat(request);
 
   assert.equal(transformed.tool_choice, "required");
 
-  const explicit = transformAnthropicToOllamaChat(
+  const explicit = transformAnthropicToOpenAIChat(
     req({
       tool_choice: { type: "tool", name: "read" },
       tools: [{ name: "read", description: "read", input_schema: { type: "object" } }],
@@ -121,7 +121,7 @@ test("converts anthropic tool_use/tool_result history", () => {
     ],
   });
 
-  const transformed = transformAnthropicToOllamaChat(request);
+  const transformed = transformAnthropicToOpenAIChat(request);
 
   assert.deepEqual(transformed.messages, [
     {
@@ -162,7 +162,7 @@ test("converts text response from openai to anthropic content block", () => {
     },
   };
 
-  const anthropic = transformOllamaChatToAnthropic(response, sampleModel);
+  const anthropic = transformOpenAIChatToAnthropic(response, sampleModel);
 
   assert.deepEqual(anthropic, {
     id: "chatcmpl-1",
@@ -208,7 +208,7 @@ test("converts openai tool_calls to anthropic tool_use blocks", () => {
     },
   };
 
-  const anthropic = transformOllamaChatToAnthropic(response, sampleModel);
+  const anthropic = transformOpenAIChatToAnthropic(response, sampleModel);
 
   assert.deepEqual(anthropic, {
     id: "chatcmpl-2",
@@ -245,7 +245,7 @@ test("maps length finish_reason to max_tokens", () => {
     ],
   };
 
-  const anthropic = transformOllamaChatToAnthropic(response, sampleModel);
+  const anthropic = transformOpenAIChatToAnthropic(response, sampleModel);
 
   assert.equal(anthropic.stop_reason, "max_tokens");
 });
@@ -262,7 +262,7 @@ test("maps missing finish_reason to end_turn", () => {
     ],
   };
 
-  const anthropic = transformOllamaChatToAnthropic(response, sampleModel);
+  const anthropic = transformOpenAIChatToAnthropic(response, sampleModel);
 
   assert.equal(anthropic.stop_reason, "end_turn");
 });
@@ -279,7 +279,7 @@ test("maps missing response id and model fallback to requested model", () => {
     ],
   };
 
-  const anthropic = transformOllamaChatToAnthropic(response, sampleModel);
+  const anthropic = transformOpenAIChatToAnthropic(response, sampleModel);
 
   assert.equal(anthropic.id, "chatcmpl-unknown");
   assert.equal(anthropic.model, sampleModel);
@@ -308,7 +308,7 @@ test("invalid tool argument json becomes empty object", () => {
     usage: {},
   };
 
-  const anthropic = transformOllamaChatToAnthropic(response, sampleModel);
+  const anthropic = transformOpenAIChatToAnthropic(response, sampleModel);
 
   assert.deepEqual(anthropic.content, [
     {

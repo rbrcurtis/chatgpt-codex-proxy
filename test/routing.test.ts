@@ -46,45 +46,48 @@ test("extractRouteKey returns undefined for missing or empty credentials", () =>
 test("loadRoutingConfigFromEnv parses PROXY_ROUTES_JSON", () => {
   const env = {
     PROXY_ROUTES_JSON:
-      '{"defaultRoute":"max","routes":{"codex":{"kind":"codex"},"max":{"kind":"ollama","baseUrl":"http://example.local/"}}}',
+      '{"defaultRoute":"max","routes":{"codex":{"kind":"codex"},"max":{"kind":"openai-compatible","baseUrl":"http://example.local/","apiKey":"test-key"}}}',
   };
 
   const config = loadRoutingConfigFromEnv(env);
 
   assert.equal(config.defaultRoute, "max");
   assert.equal(config.routes.codex.kind, "codex");
-  assert.equal(config.routes.max.kind, "ollama");
+  assert.equal(config.routes.max.kind, "openai-compatible");
   assert.equal(config.routes.max.baseUrl, "http://example.local");
+  assert.equal(config.routes.max.apiKey, "test-key");
 });
 
 test("loadRoutingConfigFromEnv falls back to default config when env is empty", () => {
   const env = {
-    MAX_OLLAMA_BASE_URL: "http://custom.max/",
+    MAX_MLX_BASE_URL: "http://custom.max/",
+    MAX_MLX_API_KEY: "local-key",
   };
 
   const config = loadRoutingConfigFromEnv(env);
 
   assert.equal(config.defaultRoute, "codex");
   assert.equal(config.routes.codex.kind, "codex");
-  assert.equal(config.routes.max.kind, "ollama");
+  assert.equal(config.routes.max.kind, "openai-compatible");
   assert.equal(config.routes.max.baseUrl, "http://custom.max");
+  assert.equal(config.routes.max.apiKey, "local-key");
 });
 
-test("loadRoutingConfigFromEnv uses default max base URL when MAX_OLLAMA_BASE_URL is missing", () => {
+test("loadRoutingConfigFromEnv uses default Max MLX base URL when MAX_MLX_BASE_URL is missing", () => {
   const config = loadRoutingConfigFromEnv({});
 
-  assert.equal(config.routes.max.baseUrl, "http://max.local:11434");
+  assert.equal(config.routes.max.baseUrl, "http://max.local:8000");
 });
 
 test("resolveBackendRoute resolves explicit route key and default route", () => {
   const config = loadRoutingConfigFromEnv({
     PROXY_ROUTES_JSON:
-      '{"defaultRoute":"codex","routes":{"codex":{"kind":"codex"},"max":{"kind":"ollama","baseUrl":"http://max.local"}}}',
+      '{"defaultRoute":"codex","routes":{"codex":{"kind":"codex"},"max":{"kind":"openai-compatible","baseUrl":"http://max.local"}}}',
   });
 
   const explicit = resolveBackendRoute("max", config);
   assert.equal(explicit.routeKey, "max");
-  assert.equal(explicit.route.kind, "ollama");
+  assert.equal(explicit.route.kind, "openai-compatible");
 
   const fallback = resolveBackendRoute(undefined, config);
   assert.equal(fallback.routeKey, "codex");
@@ -100,32 +103,25 @@ test("resolveBackendRoute rejects unknown keys", () => {
   );
 });
 
-test("loadRoutingConfigFromEnv includes max-subagent fallback route with forced model", () => {
-  const config = loadRoutingConfigFromEnv({
-    MAX_OLLAMA_BASE_URL: "http://custom.max/",
-  });
+test("loadRoutingConfigFromEnv fallback only includes ChatGPT and Max MLX routes", () => {
+  const config = loadRoutingConfigFromEnv({});
 
-  assert.equal(config.routes["max-subagent"].kind, "ollama");
-  if (config.routes["max-subagent"].kind !== "ollama") {
-    throw new Error("max-subagent route should be ollama");
-  }
-
-  assert.equal(config.routes["max-subagent"].baseUrl, "http://custom.max");
-  assert.equal(config.routes["max-subagent"].model, "qwen3-coder:30b-a3b-q8_0");
+  assert.deepEqual(Object.keys(config.routes).sort(), ["codex", "max"]);
 });
 
-test("loadRoutingConfigFromEnv parses optional ollama route model override", () => {
+test("loadRoutingConfigFromEnv parses optional OpenAI-compatible route settings", () => {
   const config = loadRoutingConfigFromEnv({
     PROXY_ROUTES_JSON:
-      '{"defaultRoute":"codex","routes":{"codex":{"kind":"codex"},"worker":{"kind":"ollama","baseUrl":"http://max.local/","model":"qwen3-coder:30b-a3b-q8_0"}}}',
+      '{"defaultRoute":"codex","routes":{"codex":{"kind":"codex"},"worker":{"kind":"openai-compatible","baseUrl":"http://max.local/","model":"qwen3-coder:30b-a3b-q8_0","apiKey":"local-key"}}}',
   });
 
   const route = config.routes.worker;
-  assert.equal(route.kind, "ollama");
-  if (route.kind !== "ollama") {
-    throw new Error("worker route should be ollama");
+  assert.equal(route.kind, "openai-compatible");
+  if (route.kind !== "openai-compatible") {
+    throw new Error("worker route should be openai-compatible");
   }
 
   assert.equal(route.baseUrl, "http://max.local");
   assert.equal(route.model, "qwen3-coder:30b-a3b-q8_0");
+  assert.equal(route.apiKey, "local-key");
 });

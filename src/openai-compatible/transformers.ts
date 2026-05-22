@@ -108,7 +108,7 @@ function transformAssistantBlocks(content: ContentBlock[]): OpenAIChatMessage[] 
   return messages;
 }
 
-function transformContentToOllamaMessages(req: AnthropicRequest): OpenAIChatMessage[] {
+function transformContentToOpenAIMessages(req: AnthropicRequest): OpenAIChatMessage[] {
   const messages: OpenAIChatMessage[] = [];
   const systemText = extractSystemText(req.system);
 
@@ -157,8 +157,8 @@ function transformContentToOllamaMessages(req: AnthropicRequest): OpenAIChatMess
   return messages;
 }
 
-export function transformAnthropicToOllamaChat(req: AnthropicRequest): OpenAIChatCompletionRequest {
-  const messages = transformContentToOllamaMessages(req);
+export function transformAnthropicToOpenAIChat(req: AnthropicRequest): OpenAIChatCompletionRequest {
+  const messages = transformContentToOpenAIMessages(req);
 
   const tools: OpenAIChatTool[] | undefined = req.tools
     ? req.tools.map((tool) => ({
@@ -237,7 +237,7 @@ function mapChoiceToBlocks(choice: OpenAIChatMessage): { content: ContentBlock[]
   return { content: blocks, hasToolUse };
 }
 
-export function transformOllamaChatToAnthropic(
+export function transformOpenAIChatToAnthropic(
   res: OpenAIChatCompletionResponse,
   requestedModel: string,
 ): AnthropicResponse {

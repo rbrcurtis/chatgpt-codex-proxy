@@ -9,7 +9,7 @@ function collectResponseBody(res: Response): Promise<unknown> {
   return res.json() as Promise<unknown>;
 }
 
-test("POST /v1/messages dispatches to ollama when routed by api key", async () => {
+test("POST /v1/messages dispatches to openai-compatible when routed by api key", async () => {
   const originalFetch = globalThis.fetch;
   const originalProxyRoutesJson = process.env.PROXY_ROUTES_JSON;
 
@@ -17,7 +17,7 @@ test("POST /v1/messages dispatches to ollama when routed by api key", async () =
   let calledBody: { stream?: boolean } | undefined;
 
   process.env.PROXY_ROUTES_JSON =
-    '{"defaultRoute":"codex","routes":{"codex":{"kind":"codex"},"max":{"kind":"ollama","baseUrl":"http://max.internal:11434"}}}';
+    '{"defaultRoute":"codex","routes":{"codex":{"kind":"codex"},"max":{"kind":"openai-compatible","baseUrl":"http://max.internal:8000"}}}';
 
   globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
     const target = String(url);
@@ -39,7 +39,7 @@ test("POST /v1/messages dispatches to ollama when routed by api key", async () =
           {
             message: {
               role: "assistant",
-              content: "routed to ollama",
+              content: "routed to openai-compatible",
             },
             finish_reason: "stop",
           },
@@ -81,11 +81,11 @@ test("POST /v1/messages dispatches to ollama when routed by api key", async () =
     const body = await collectResponseBody(response);
 
     assert.equal(response.status, 200);
-    assert.equal(calledUrl, "http://max.internal:11434/v1/chat/completions");
+    assert.equal(calledUrl, "http://max.internal:8000/v1/chat/completions");
     assert.equal(calledBody?.stream, false);
     assert.deepEqual((body as { content?: unknown[] }).content?.[0], {
       type: "text",
-      text: "routed to ollama",
+      text: "routed to openai-compatible",
     });
   } finally {
     await new Promise<void>((resolve) => {

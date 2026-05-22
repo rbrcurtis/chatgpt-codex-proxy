@@ -1,9 +1,9 @@
 import { type Response as ExpressResponse } from "express";
 
 import type { AnthropicRequest, AnthropicResponse } from "../types/anthropic.js";
-import type { OllamaBackendRoute } from "../routing/routes.js";
+import type { OpenAICompatibleBackendRoute } from "../routing/routes.js";
 import type { OpenAIChatCompletionResponse } from "./types.js";
-import { transformAnthropicToOllamaChat, transformOllamaChatToAnthropic } from "./transformers.js";
+import { transformAnthropicToOpenAIChat, transformOpenAIChatToAnthropic } from "./transformers.js";
 import { ProxyError } from "../utils/errors.js";
 
 interface OpenAIStreamingChoice {
@@ -33,7 +33,7 @@ interface OpenAIStreamingResponse {
   usage?: OpenAIStreamingUsage;
 }
 
-interface OllamaToolCallBuffer {
+interface OpenAICompatibleToolCallBuffer {
   id: string;
   name: string;
   arguments: string;
@@ -72,7 +72,7 @@ function writeSseEvent(res: ExpressResponse, event: string, data: unknown): void
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
-function applyRouteModel(route: OllamaBackendRoute, body: AnthropicRequest): AnthropicRequest {
+function applyRouteModel(route: OpenAICompatibleBackendRoute, body: AnthropicRequest): AnthropicRequest {
   if (!route.model) {
     return body;
   }
@@ -83,51 +83,53 @@ function applyRouteModel(route: OllamaBackendRoute, body: AnthropicRequest): Ant
   };
 }
 
-export class OllamaClient {
-  async createMessage(route: OllamaBackendRoute, body: AnthropicRequest): Promise<AnthropicResponse> {
+export class OpenAICompatibleClient {
+  async createMessage(route: OpenAICompatibleBackendRoute, body: AnthropicRequest): Promise<AnthropicResponse> {
     const effectiveBody = applyRouteModel(route, body);
     const res = await fetch(`${route.baseUrl}/v1/chat/completions`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
+        ...(route.apiKey ? { authorization: `Bearer ${route.apiKey}` } : {}),
       },
-      body: JSON.stringify(transformAnthropicToOllamaChat({ ...effectiveBody, stream: false })),
+      body: JSON.stringify(transformAnthropicToOpenAIChat({ ...effectiveBody, stream: false })),
     });
 
     if (!res.ok) {
       const text = await res.text();
       throw new ProxyError(
-        `Ollama upstream ${res.status}: ${text.slice(0, 500)}`,
+        `OpenAI-compatible upstream ${res.status}: ${text.slice(0, 500)}`,
         res.status >= 500 ? 502 : res.status,
         res.status === 401 || res.status === 403 ? "authentication_error" : "api_error",
       );
     }
 
     const json = (await res.json()) as OpenAIChatCompletionResponse;
-    return transformOllamaChatToAnthropic(json, effectiveBody.model);
+    return transformOpenAIChatToAnthropic(json, effectiveBody.model);
   }
 
-  async streamMessage(route: OllamaBackendRoute, body: AnthropicRequest, res: ExpressResponse): Promise<void> {
+  async streamMessage(route: OpenAICompatibleBackendRoute, body: AnthropicRequest, res: ExpressResponse): Promise<void> {
     const effectiveBody = applyRouteModel(route, body);
     const upstreamRes = await fetch(`${route.baseUrl}/v1/chat/completions`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
+        ...(route.apiKey ? { authorization: `Bearer ${route.apiKey}` } : {}),
       },
-      body: JSON.stringify(transformAnthropicToOllamaChat({ ...effectiveBody, stream: true })),
+      body: JSON.stringify(transformAnthropicToOpenAIChat({ ...effectiveBody, stream: true })),
     });
 
     if (!upstreamRes.ok) {
       const text = await upstreamRes.text();
       throw new ProxyError(
-        `Ollama upstream ${upstreamRes.status}: ${text.slice(0, 500)}`,
+        `OpenAI-compatible upstream ${upstreamRes.status}: ${text.slice(0, 500)}`,
         upstreamRes.status >= 500 ? 502 : upstreamRes.status,
         upstreamRes.status === 401 || upstreamRes.status === 403 ? "authentication_error" : "api_error",
       );
     }
 
     if (!upstreamRes.body) {
-      throw new ProxyError("Ollama upstream returned no stream body", 502, "api_error");
+      throw new ProxyError("OpenAI-compatible upstream returned no stream body", 502, "api_error");
     }
 
     res.setHeader("Content-Type", "text/event-stream");
@@ -139,7 +141,7 @@ export class OllamaClient {
     let buffer = "";
 
     let sawTextBlock = false;
-    const toolCallsByIndex = new Map<number, OllamaToolCallBuffer>();
+    const toolCallsByIndex = new Map<number, OpenAICompatibleToolCallBuffer>();
     let usage: OpenAIStreamingUsage = {};
     let finishReason: string | undefined;
     let responseId = "chatcmpl-unknown";

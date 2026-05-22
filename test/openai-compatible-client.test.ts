@@ -1,16 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { OllamaClient } from "../src/ollama/client.js";
+import { OpenAICompatibleClient } from "../src/openai-compatible/client.js";
 import type { Response as ExpressResponse } from "express";
 import type { AnthropicRequest } from "../src/types/anthropic.js";
-import type { OllamaBackendRoute } from "../src/routing/routes.js";
-import type { OpenAIChatCompletionResponse } from "../src/ollama/types.js";
+import type { OpenAICompatibleBackendRoute } from "../src/routing/routes.js";
+import type { OpenAIChatCompletionResponse } from "../src/openai-compatible/types.js";
 import { ProxyError } from "../src/utils/errors.js";
 
-const route: OllamaBackendRoute = {
-  kind: "ollama",
-  baseUrl: "http://max.local:11434",
+const route: OpenAICompatibleBackendRoute = {
+  kind: "openai-compatible",
+  baseUrl: "http://max.local:8000",
 };
 
 function request(overrides: Partial<AnthropicRequest> = {}): AnthropicRequest {
@@ -55,10 +55,10 @@ test("createMessage posts transformed anthropic request and maps the response", 
   }) as typeof fetch;
 
   try {
-    const client = new OllamaClient();
+    const client = new OpenAICompatibleClient();
     const result = await client.createMessage(route, request({ stream: true }));
 
-    assert.equal(seen.url, "http://max.local:11434/v1/chat/completions");
+    assert.equal(seen.url, "http://max.local:8000/v1/chat/completions");
     assert.equal(seen.init?.method, "POST");
     assert.equal(
       (seen.init?.headers as Record<string, string | undefined>)["content-type"],
@@ -88,6 +88,46 @@ test("createMessage posts transformed anthropic request and maps the response", 
   }
 });
 
+test("createMessage sends bearer token when route apiKey is configured", async () => {
+  const originalFetch = globalThis.fetch;
+  const seen: { headers?: RequestInit["headers"] } = {};
+
+  globalThis.fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+    seen.headers = init?.headers;
+
+    const json: OpenAIChatCompletionResponse = {
+      id: "chatcmpl-auth",
+      model: "max-model",
+      choices: [
+        {
+          message: {
+            role: "assistant",
+            content: "done",
+          },
+          finish_reason: "stop",
+        },
+      ],
+    };
+
+    return new Response(JSON.stringify(json), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const client = new OpenAICompatibleClient();
+    await client.createMessage({ ...route, apiKey: "local-key" }, request());
+
+    assert.equal(
+      (seen.headers as Record<string, string | undefined>).authorization,
+      "Bearer local-key",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("createMessage throws a proxy error for non-ok upstream responses", async () => {
   const originalFetch = globalThis.fetch;
 
@@ -98,13 +138,13 @@ test("createMessage throws a proxy error for non-ok upstream responses", async (
     })) as typeof fetch;
 
   try {
-    const client = new OllamaClient();
+    const client = new OpenAICompatibleClient();
 
     await assert.rejects(
       () => client.createMessage(route, request()),
       (err: unknown) => {
         assert.ok(err instanceof ProxyError);
-        assert.equal(err.message, "Ollama upstream 401: nope");
+        assert.equal(err.message, "OpenAI-compatible upstream 401: nope");
         assert.equal(err.statusCode, 401);
         assert.equal(err.errorType, "authentication_error");
         return true;
@@ -222,10 +262,10 @@ test("streamMessage forwards stream=true and emits Anthropic SSE", async () => {
   };
 
   try {
-    const client = new OllamaClient();
+    const client = new OpenAICompatibleClient();
     await client.streamMessage(route, request({ stream: true }), response as unknown as ExpressResponse);
 
-    assert.equal(seen.url, "http://max.local:11434/v1/chat/completions");
+    assert.equal(seen.url, "http://max.local:8000/v1/chat/completions");
     const forwardedBody = seen.body as { stream?: boolean };
     assert.equal(forwardedBody.stream, true);
 
@@ -350,7 +390,7 @@ test("streamMessage ignores malformed SSE data and continues", async () => {
   };
 
   try {
-    const client = new OllamaClient();
+    const client = new OpenAICompatibleClient();
     await client.streamMessage(route, request({ stream: true }), response as unknown as ExpressResponse);
 
     const events = collectSseEvents(writer);
@@ -385,7 +425,7 @@ test("streamMessage ignores malformed SSE data and continues", async () => {
   }
 });
 
-test("createMessage uses route model override for upstream ollama request", async () => {
+test("createMessage uses route model override for upstream OpenAI-compatible request", async () => {
   const calls: Array<{ url: string; body: unknown }> = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (url, init) => {
@@ -412,11 +452,11 @@ test("createMessage uses route model override for upstream ollama request", asyn
   }) as typeof fetch;
 
   try {
-    const client = new OllamaClient();
+    const client = new OpenAICompatibleClient();
     const response = await client.createMessage(
       {
-        kind: "ollama",
-        baseUrl: "http://max.local:11434",
+        kind: "openai-compatible",
+        baseUrl: "http://max.local:8000",
         model: "qwen3-coder:30b-a3b-q8_0",
       },
       {
@@ -435,7 +475,7 @@ test("createMessage uses route model override for upstream ollama request", asyn
   }
 });
 
-test("streamMessage uses route model override for upstream ollama request", async () => {
+test("streamMessage uses route model override for upstream OpenAI-compatible request", async () => {
   const calls: Array<{ url: string; body: unknown }> = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (url, init) => {
@@ -466,7 +506,7 @@ test("streamMessage uses route model override for upstream ollama request", asyn
   }) as typeof fetch;
 
   try {
-    const client = new OllamaClient();
+    const client = new OpenAICompatibleClient();
     const chunks: string[] = [];
     const res = {
       setHeader() {},
@@ -478,8 +518,8 @@ test("streamMessage uses route model override for upstream ollama request", asyn
 
     await client.streamMessage(
       {
-        kind: "ollama",
-        baseUrl: "http://max.local:11434",
+        kind: "openai-compatible",
+        baseUrl: "http://max.local:8000",
         model: "qwen3-coder:30b-a3b-q8_0",
       },
       {
@@ -534,7 +574,7 @@ test("streamMessage parses SSE data lines without a space after colon", async ()
   };
 
   try {
-    const client = new OllamaClient();
+    const client = new OpenAICompatibleClient();
     await client.streamMessage(route, request({ stream: true }), response as unknown as ExpressResponse);
 
     const events = collectSseEvents(writer);

@@ -102,6 +102,18 @@ gpt() {
 cp .env.example .env
 ```
 
+### Backend routing
+
+By default, requests route to ChatGPT/Codex. Set `x-api-key` or `Authorization: Bearer` to a configured route key to use another backend.
+
+The production Max route uses the MLX OpenAI-compatible server on the LAN:
+
+```env
+PROXY_ROUTES_JSON={"defaultRoute":"codex","routes":{"codex":{"kind":"codex"},"max":{"kind":"openai-compatible","baseUrl":"http://max.local:8000","apiKey":"mlx-openai-server"}}}
+```
+
+Without `PROXY_ROUTES_JSON`, the fallback route set is `codex` plus `max` at `MAX_MLX_BASE_URL` or `http://max.local:8000`. `MAX_MLX_API_KEY` is forwarded as a bearer token when set.
+
 ### Model mapping
 
 By default (`PASSTHROUGH_MODE=true`) the proxy forwards whatever model name Claude Code sends straight to Codex. Set `PASSTHROUGH_MODE=false` to enable automatic Claude → Codex mapping:

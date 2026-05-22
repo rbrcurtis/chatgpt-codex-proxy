@@ -24,12 +24,12 @@ import { transformAnthropicToCodex } from "../transformers/request.js";
 import { transformCodexToAnthropic } from "../transformers/response.js";
 import type { AnthropicRequest, AnthropicResponse } from "../types/anthropic.js";
 import { ProxyError } from "../utils/errors.js";
-import { OllamaClient } from "../ollama/client.js";
+import { OpenAICompatibleClient } from "../openai-compatible/client.js";
 import { extractRouteKey, loadRoutingConfigFromEnv, resolveBackendRoute } from "../routing/routes.js";
 
 const router = Router();
 const codexClient = new CodexClient();
-const ollamaClient = new OllamaClient();
+const openAICompatibleClient = new OpenAICompatibleClient();
 
 async function handleCodexMessages(body: AnthropicRequest): Promise<AnthropicResponse> {
   const inboundThinking = body.thinking?.type === "enabled"
@@ -112,14 +112,14 @@ router.post(
       const backend = resolveBackendRoute(routeKey, routingConfig);
       console.log(`[chatgpt-codex-proxy] route key=${backend.routeKey} kind=${backend.route.kind} model=${body.model}`);
 
-      if (backend.route.kind === "ollama" && body.stream) {
-        await ollamaClient.streamMessage(backend.route, body, res);
+      if (backend.route.kind === "openai-compatible" && body.stream) {
+        await openAICompatibleClient.streamMessage(backend.route, body, res);
         return;
       }
 
       const anthropicResponse =
-        backend.route.kind === "ollama"
-          ? await ollamaClient.createMessage(backend.route, body)
+        backend.route.kind === "openai-compatible"
+          ? await openAICompatibleClient.createMessage(backend.route, body)
           : await handleCodexMessages(body);
 
       // Handle streaming
