@@ -1,3 +1,5 @@
+import { ProxyError } from "../utils/errors.js";
+
 export type HeaderValue = string | string[] | undefined;
 export type HeaderBag = Record<string, HeaderValue>;
 
@@ -176,7 +178,11 @@ export function resolveBackendRoute(
   const route = config.routes[resolvedKey];
 
   if (!route) {
-    throw new Error(`Unknown proxy route key "${resolvedKey}"`);
+    throw new ProxyError(
+      `Unknown proxy route key "${resolvedKey}"`,
+      400,
+      "invalid_request_error",
+    );
   }
 
   return {

@@ -7,6 +7,7 @@ import {
   resolveBackendRoute,
   type HeaderBag,
 } from "../src/routing/routes.js";
+import { ProxyError } from "../src/utils/errors.js";
 
 test("extractRouteKey prefers x-api-key over Authorization", () => {
   const headers: HeaderBag = {
@@ -99,7 +100,11 @@ test("resolveBackendRoute rejects unknown keys", () => {
 
   assert.throws(
     () => resolveBackendRoute("unknown", config),
-    /Unknown proxy route key "unknown"/,
+    (err: unknown) =>
+      err instanceof ProxyError &&
+      err.statusCode === 400 &&
+      err.errorType === "invalid_request_error" &&
+      err.message === 'Unknown proxy route key "unknown"',
   );
 });
 
