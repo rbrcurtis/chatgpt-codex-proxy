@@ -91,11 +91,6 @@ const MUTATING_TOOL_NAME_PATTERNS = [
   /(^|[_-])rename($|[_-])/i,
 ];
 
-const CODEX_UNSUPPORTED_TOOL_NAMES = new Set([
-  "WebFetch",
-  "Workflow",
-]);
-
 /*
 [목적]
 도구 이름만 보고(휴리스틱) "상태를 바꾸는(mutating)" 성격의 도구인지 판단한다.
@@ -418,9 +413,7 @@ export function transformAnthropicToCodex(anthropic: AnthropicRequest): CodexReq
     input.push(...contentToInputItems(msg.role, msg.content));
   }
 
-  const tools = anthropic.tools
-    ?.filter((tool) => !CODEX_UNSUPPORTED_TOOL_NAMES.has(tool.name))
-    .map(mapAnthropicToolToCodexTool);
+  const tools = anthropic.tools?.map(mapAnthropicToolToCodexTool);
 
   const hasTools = !!(tools && tools.length > 0);
   const toolChoice = mapToolChoice(anthropic.tool_choice, hasTools);

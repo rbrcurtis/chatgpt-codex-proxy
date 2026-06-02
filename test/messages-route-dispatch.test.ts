@@ -4,6 +4,9 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 
 import app from "../src/server.js";
+import { createToolResultRetryRequest, isEmptyZeroToolResultResponse } from "../src/routes/messages.js";
+import type { CodexRequest } from "../src/transformers/request.js";
+import type { AnthropicResponse } from "../src/types/anthropic.js";
 
 function collectResponseBody(res: Response): Promise<unknown> {
   return res.json() as Promise<unknown>;
@@ -98,4 +101,51 @@ test("POST /v1/messages dispatches to openai-compatible when routed by api key",
       process.env.PROXY_ROUTES_JSON = originalProxyRoutesJson;
     }
   }
+});
+
+test("createToolResultRetryRequest keeps only previously called tools", () => {
+  const request: CodexRequest = {
+    model: "gpt-5.5",
+    instructions: "",
+    stream: true,
+    store: false,
+    reasoning: { effort: "medium", summary: "auto" },
+    text: { verbosity: "medium" },
+    input: [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "use lookup" }] },
+      { type: "function_call", call_id: "call_lookup", name: "lookup", arguments: "{}" },
+      { type: "function_call_output", call_id: "call_lookup", output: "PONG" },
+    ],
+    tools: [
+      { type: "function", name: "lookup", parameters: { type: "object", properties: {} } },
+      { type: "function", name: "WebFetch", parameters: { type: "object", properties: {} } },
+      { type: "function", name: "Workflow", parameters: { type: "object", properties: {} } },
+    ],
+    tool_choice: "auto",
+    parallel_tool_calls: true,
+  };
+
+  const retry = createToolResultRetryRequest(request);
+
+  assert.deepEqual(retry?.tools?.map((tool) => tool.name), ["lookup"]);
+  assert.equal(retry?.tool_choice, "auto");
+  assert.equal(retry?.parallel_tool_calls, undefined);
+});
+
+test("isEmptyZeroToolResultResponse detects blank zero-token responses", () => {
+  const response: AnthropicResponse = {
+    id: "msg_1",
+    type: "message",
+    role: "assistant",
+    model: "gpt-5.5",
+    content: [{ type: "text", text: "" }],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 0, output_tokens: 0 },
+  };
+
+  assert.equal(isEmptyZeroToolResultResponse(response), true);
+
+  response.content = [{ type: "text", text: "PONG" }];
+  assert.equal(isEmptyZeroToolResultResponse(response), false);
 });

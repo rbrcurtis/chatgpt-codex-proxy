@@ -23,6 +23,7 @@ import { CodexApiError, CodexClient } from "../codex/client.js";
 import { transformAnthropicToCodex } from "../transformers/request.js";
 import { transformCodexToAnthropic } from "../transformers/response.js";
 import type { AnthropicRequest, AnthropicResponse } from "../types/anthropic.js";
+import type { CodexRequest } from "../transformers/request.js";
 import { ProxyError } from "../utils/errors.js";
 import { OpenAICompatibleClient } from "../openai-compatible/client.js";
 import { extractRouteKey, loadRoutingConfigFromEnv, resolveBackendRoute } from "../routing/routes.js";
@@ -30,6 +31,68 @@ import { extractRouteKey, loadRoutingConfigFromEnv, resolveBackendRoute } from "
 const router = Router();
 const codexClient = new CodexClient();
 const openAICompatibleClient = new OpenAICompatibleClient();
+
+function latestMessageHasToolResult(body: AnthropicRequest): boolean {
+  const latest = body.messages.at(-1);
+  if (!latest || typeof latest.content === "string") return false;
+  return latest.content.some((block) => block.type === "tool_result");
+}
+
+export function isEmptyZeroToolResultResponse(response: AnthropicResponse): boolean {
+  const inputTokens = response.usage?.input_tokens ?? 0;
+  const outputTokens = response.usage?.output_tokens ?? 0;
+  if (inputTokens !== 0 || outputTokens !== 0) return false;
+
+  const text = (response.content ?? [])
+    .map((block) => block.type === "text" ? block.text ?? "" : "")
+    .join("");
+  const hasToolUse = (response.content ?? []).some((block) => block.type === "tool_use");
+  return !hasToolUse && text.trim().length === 0;
+}
+
+export function createToolResultRetryRequest(request: CodexRequest): CodexRequest | null {
+  if (!request.tools || request.tools.length === 0) return null;
+
+  const calledToolNames = new Set<string>();
+  for (const item of request.input) {
+    if (item.type === "function_call" && item.name) {
+      calledToolNames.add(item.name);
+    }
+  }
+
+  if (calledToolNames.size === 0) return null;
+
+  const retryTools = request.tools.filter((tool) => calledToolNames.has(tool.name));
+  if (retryTools.length === request.tools.length) return null;
+
+  return {
+    ...request,
+    tools: retryTools.length > 0 ? retryTools : undefined,
+    tool_choice: retryTools.length > 0 ? "auto" : undefined,
+    parallel_tool_calls: retryTools.length > 1 ? request.parallel_tool_calls : undefined,
+  };
+}
+
+function countCodexFunctionCalls(response: { output?: Array<{ type?: string }> }): number {
+  return (response.output ?? []).filter((item) => item.type === "function_call").length;
+}
+
+function countCodexOutputTextBlocks(response: { output?: Array<{ content?: Array<{ type?: string; text?: string }> }> }): number {
+  return (response.output ?? []).reduce((acc, item) => {
+    const parts = item.content ?? [];
+    return (
+      acc +
+      parts.filter((part) => part.type === "output_text" && typeof part.text === "string" && part.text.length > 0).length
+    );
+  }, 0);
+}
+
+function countAnthropicBlocks(response: AnthropicResponse): { toolUse: number; text: number } {
+  return {
+    toolUse: (response.content ?? []).filter((block) => block.type === "tool_use").length,
+    text: (response.content ?? []).filter((block) => block.type === "text").length,
+  };
+}
 
 async function handleCodexMessages(body: AnthropicRequest): Promise<AnthropicResponse> {
   const inboundThinking = body.thinking?.type === "enabled"
@@ -53,23 +116,36 @@ async function handleCodexMessages(body: AnthropicRequest): Promise<AnthropicRes
     )} tool_count=${inboundToolCount} inbound_tool_choice=${inboundToolChoice} codex_tool_choice=${String(codexRequest.tool_choice)} tool_names=[${inboundToolNames}]`,
   );
 
-  const codexResponse = await codexClient.createResponse(codexRequest);
-  const anthropicResponse = transformCodexToAnthropic(codexResponse, body.model);
+  let codexResponse = await codexClient.createResponse(codexRequest);
+  let anthropicResponse = transformCodexToAnthropic(codexResponse, body.model);
 
-  const codexFunctionCalls = (codexResponse.output ?? []).filter((item) => item.type === "function_call").length;
-  const codexOutputText = (codexResponse.output ?? []).reduce((acc, item) => {
-    const parts = item.content ?? [];
-    return (
-      acc +
-      parts.filter((part) => part.type === "output_text" && typeof part.text === "string" && part.text.length > 0).length
-    );
-  }, 0);
-  const anthropicToolUse = (anthropicResponse.content ?? []).filter((block) => block.type === "tool_use").length;
-  const anthropicText = (anthropicResponse.content ?? []).filter((block) => block.type === "text").length;
+  let codexFunctionCalls = countCodexFunctionCalls(codexResponse);
+  let codexOutputText = countCodexOutputTextBlocks(codexResponse);
+  let anthropicBlocks = countAnthropicBlocks(anthropicResponse);
 
   console.log(
-    `[chatgpt-codex-proxy] tool_diag parallel=${String(codexRequest.parallel_tool_calls)} codex_fn_calls=${codexFunctionCalls} codex_text_blocks=${codexOutputText} anthropic_tool_use=${anthropicToolUse} anthropic_text_blocks=${anthropicText} stop_reason=${anthropicResponse.stop_reason}`,
+    `[chatgpt-codex-proxy] tool_diag parallel=${String(codexRequest.parallel_tool_calls)} codex_fn_calls=${codexFunctionCalls} codex_text_blocks=${codexOutputText} anthropic_tool_use=${anthropicBlocks.toolUse} anthropic_text_blocks=${anthropicBlocks.text} stop_reason=${anthropicResponse.stop_reason}`,
   );
+
+  if (latestMessageHasToolResult(body) && isEmptyZeroToolResultResponse(anthropicResponse)) {
+    const retryRequest = createToolResultRetryRequest(codexRequest);
+    if (retryRequest) {
+      const retryToolNames = (retryRequest.tools ?? []).map((tool) => tool.name).join(",");
+      console.log(
+        `[chatgpt-codex-proxy] tool_retry reason=empty_zero_after_tool_result original_tools=${codexRequest.tools?.length ?? 0} retry_tools=${retryRequest.tools?.length ?? 0} retry_tool_names=[${retryToolNames}]`,
+      );
+
+      codexResponse = await codexClient.createResponse(retryRequest);
+      anthropicResponse = transformCodexToAnthropic(codexResponse, body.model);
+      codexFunctionCalls = countCodexFunctionCalls(codexResponse);
+      codexOutputText = countCodexOutputTextBlocks(codexResponse);
+      anthropicBlocks = countAnthropicBlocks(anthropicResponse);
+
+      console.log(
+        `[chatgpt-codex-proxy] tool_retry_diag parallel=${String(retryRequest.parallel_tool_calls)} codex_fn_calls=${codexFunctionCalls} codex_text_blocks=${codexOutputText} anthropic_tool_use=${anthropicBlocks.toolUse} anthropic_text_blocks=${anthropicBlocks.text} stop_reason=${anthropicResponse.stop_reason}`,
+      );
+    }
+  }
 
   return anthropicResponse;
 }
