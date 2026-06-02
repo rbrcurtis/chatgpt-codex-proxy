@@ -56,7 +56,7 @@ export type ContentBlock =
   | ToolResultContentBlock;
 
 export interface AnthropicMessage {
-  role: Exclude<MessageRole, "system">;
+  role: MessageRole;
   content: string | ContentBlock[];
 }
 

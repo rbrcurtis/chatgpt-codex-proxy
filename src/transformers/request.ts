@@ -91,6 +91,11 @@ const MUTATING_TOOL_NAME_PATTERNS = [
   /(^|[_-])rename($|[_-])/i,
 ];
 
+const CODEX_UNSUPPORTED_TOOL_NAMES = new Set([
+  "WebFetch",
+  "Workflow",
+]);
+
 /*
 [목적]
 도구 이름만 보고(휴리스틱) "상태를 바꾸는(mutating)" 성격의 도구인지 판단한다.
@@ -181,8 +186,37 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function normalizeJsonSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeJsonSchema);
+  if (!isPlainObject(value)) return value;
+
+  const normalized: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    normalized[key] = normalizeJsonSchema(child);
+  }
+
+  if (typeof normalized.additionalProperties !== "undefined" && typeof normalized.additionalProperties !== "boolean") {
+    normalized.additionalProperties = true;
+  }
+
+  if (normalized.type === "object") {
+    if (!isPlainObject(normalized.properties)) {
+      normalized.properties = {};
+    }
+    if (!Array.isArray(normalized.required)) {
+      delete normalized.required;
+    }
+    if (typeof normalized.additionalProperties === "undefined") {
+      normalized.additionalProperties = true;
+    }
+  }
+
+  return normalized;
+}
+
 function normalizeToolParameters(schema: Record<string, unknown> | undefined): Record<string, unknown> {
-  const normalized: Record<string, unknown> = isPlainObject(schema) ? { ...schema } : {};
+  const normalizedValue = normalizeJsonSchema(schema);
+  const normalized: Record<string, unknown> = isPlainObject(normalizedValue) ? normalizedValue : {};
 
   if (typeof normalized.type !== "string") {
     normalized.type = "object";
@@ -369,14 +403,24 @@ export function transformAnthropicToCodex(anthropic: AnthropicRequest): CodexReq
   const codexModel = mapAnthropicModelToCodex(anthropic.model);
   const effort = getEffortForModel(codexModel);
 
-  const systemInstruction = extractSystemPrompt(anthropic.system);
+  let systemInstruction = extractSystemPrompt(anthropic.system).trim();
 
   const input: CodexInputItem[] = [];
   for (const msg of anthropic.messages ?? []) {
+    if (msg.role === "system") {
+      const text = extractSystemPrompt(msg.content).trim();
+      if (text) {
+        systemInstruction = systemInstruction ? `${systemInstruction}\n\n${text}` : text;
+      }
+      continue;
+    }
+
     input.push(...contentToInputItems(msg.role, msg.content));
   }
 
-  const tools = anthropic.tools?.map(mapAnthropicToolToCodexTool);
+  const tools = anthropic.tools
+    ?.filter((tool) => !CODEX_UNSUPPORTED_TOOL_NAMES.has(tool.name))
+    .map(mapAnthropicToolToCodexTool);
 
   const hasTools = !!(tools && tools.length > 0);
   const toolChoice = mapToolChoice(anthropic.tool_choice, hasTools);

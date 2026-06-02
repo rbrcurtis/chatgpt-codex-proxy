@@ -354,6 +354,8 @@ export class CodexClient {
     const fallbackItems = [...fallbackOutputItems.values()];
 
     if (finalResponse) {
+      finalResponse.output = Array.isArray(finalResponse.output) ? finalResponse.output : [];
+
       if (finalResponse.output.length === 0 && fallbackItems.length > 0) {
         finalResponse.output = fallbackItems;
       } else if (fallbackItems.length > 0) {
