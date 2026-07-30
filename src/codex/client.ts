@@ -59,6 +59,13 @@ export interface CodexResponse {
   output: CodexOutputItem[];
   usage?: CodexUsage;
   stop_reason?: string;
+  error?: {
+    code?: string;
+    message?: string;
+  } | null;
+  incomplete_details?: {
+    reason?: string;
+  } | null;
   [key: string]: unknown;
 }
 
@@ -103,13 +110,13 @@ async function* parseSseStream(stream: ReadableStream<Uint8Array>): AsyncGenerat
     buffer += decoder.decode(value, { stream: true });
 
     while (true) {
-      const idx = buffer.indexOf("\n\n");
-      if (idx === -1) break;
+      const separator = /\r\n\r\n|\n\n|\r\r/.exec(buffer);
+      if (!separator || separator.index === undefined) break;
 
-      const rawEvent = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 2);
+      const rawEvent = buffer.slice(0, separator.index);
+      buffer = buffer.slice(separator.index + separator[0].length);
 
-      const lines = rawEvent.split("\n");
+      const lines = rawEvent.split(/\r\n|\r|\n/);
       let event = "message";
       const dataParts: string[] = [];
 
@@ -129,7 +136,7 @@ async function* parseSseStream(stream: ReadableStream<Uint8Array>): AsyncGenerat
   }
 
   if (buffer.trim()) {
-    const lines = buffer.split("\n");
+    const lines = buffer.split(/\r\n|\r|\n/);
     let event = "message";
     const dataParts: string[] = [];
 
@@ -256,6 +263,13 @@ export class CodexClient {
 
       let parsed: {
         type?: string;
+        code?: string;
+        message?: string;
+        error?: {
+          type?: string;
+          code?: string;
+          message?: string;
+        };
         delta?: string;
         text?: string;
         item_id?: string;
@@ -340,9 +354,34 @@ export class CodexClient {
         });
       }
 
-      // Capture final response
-      if ((parsed.type === "response.done" || parsed.type === "response.completed") && parsed.response) {
-        finalResponse = parsed.response;
+      if (parsed.type === "error") {
+        const code = parsed.error?.code ?? parsed.code ?? parsed.error?.type;
+        const message = parsed.error?.message ?? parsed.message;
+        const details = [code, message].filter(Boolean).join(": ");
+        throw new CodexApiError(`Codex stream error: ${details || "Unknown error"}`, 502, parsed);
+      }
+
+      if (parsed.type === "response.failed") {
+        const error = parsed.response?.error;
+        const reason = parsed.response?.incomplete_details?.reason;
+        const details = error?.message
+          ? `${error.code || "unknown"}: ${error.message}`
+          : reason
+            ? `incomplete: ${reason}`
+            : "Unknown error";
+        throw new CodexApiError(`Codex stream failed: ${details}`, 502, parsed.response);
+      }
+
+      if (
+        (parsed.type === "response.done" ||
+          parsed.type === "response.completed" ||
+          parsed.type === "response.incomplete") &&
+        parsed.response
+      ) {
+        finalResponse =
+          parsed.type === "response.incomplete"
+            ? { ...parsed.response, stop_reason: "max_tokens" }
+            : parsed.response;
       }
     }
 
@@ -353,61 +392,47 @@ export class CodexClient {
       outputTextParts.join("");
     const fallbackItems = [...fallbackOutputItems.values()];
 
-    if (finalResponse) {
-      finalResponse.output = Array.isArray(finalResponse.output) ? finalResponse.output : [];
+    if (!finalResponse) {
+      throw new CodexApiError("Codex stream ended before a terminal response event.", 502);
+    }
 
-      if (finalResponse.output.length === 0 && fallbackItems.length > 0) {
-        finalResponse.output = fallbackItems;
-      } else if (fallbackItems.length > 0) {
-        const existingKeys = new Set(finalResponse.output.map((item) => getOutputItemKey(item)));
-        for (const item of fallbackItems) {
-          const key = getOutputItemKey(item);
-          if (!existingKeys.has(key)) {
-            finalResponse.output.push(item);
-          }
+    finalResponse.output = Array.isArray(finalResponse.output) ? finalResponse.output : [];
+
+    if (finalResponse.output.length === 0 && fallbackItems.length > 0) {
+      finalResponse.output = fallbackItems;
+    } else if (fallbackItems.length > 0) {
+      const existingKeys = new Set(finalResponse.output.map((item) => getOutputItemKey(item)));
+      for (const item of fallbackItems) {
+        const key = getOutputItemKey(item);
+        if (!existingKeys.has(key)) {
+          finalResponse.output.push(item);
         }
       }
+    }
 
-      const messageItem = finalResponse.output.find((item) => item.type === "message");
-      if (fallbackText && !messageItem) {
-        finalResponse.output = [
-          ...finalResponse.output,
-          {
-            role: "assistant",
-            type: "message",
-            content: [{ type: "output_text", text: fallbackText }],
-          },
-        ];
-        return finalResponse;
-      }
-
-      if (fallbackText && messageItem) {
-        messageItem.content ??= [];
-        const outputTextContent = messageItem.content.find((part) => part.type === "output_text");
-        if (!outputTextContent) {
-          messageItem.content.push({ type: "output_text", text: fallbackText });
-        } else if (typeof outputTextContent.text !== "string" || outputTextContent.text.length === 0) {
-          outputTextContent.text = fallbackText;
-        }
-      }
-
+    const messageItem = finalResponse.output.find((item) => item.type === "message");
+    if (fallbackText && !messageItem) {
+      finalResponse.output = [
+        ...finalResponse.output,
+        {
+          role: "assistant",
+          type: "message",
+          content: [{ type: "output_text", text: fallbackText }],
+        },
+      ];
       return finalResponse;
     }
 
-    // Fallback: construct response from accumulated text
-    return {
-      id: randomUUID(),
-      model: "codex",
-      output: fallbackItems.length > 0
-        ? fallbackItems
-        : [
-            {
-              role: "assistant",
-              type: "message",
-              content: [{ type: "output_text", text: fallbackText }],
-            },
-          ],
-      stop_reason: "end_turn",
-    };
+    if (fallbackText && messageItem) {
+      messageItem.content ??= [];
+      const outputTextContent = messageItem.content.find((part) => part.type === "output_text");
+      if (!outputTextContent) {
+        messageItem.content.push({ type: "output_text", text: fallbackText });
+      } else if (typeof outputTextContent.text !== "string" || outputTextContent.text.length === 0) {
+        outputTextContent.text = fallbackText;
+      }
+    }
+
+    return finalResponse;
   }
 }

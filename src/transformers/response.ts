@@ -86,7 +86,11 @@ export function transformCodexToAnthropic(
     role: "assistant",
     model: originalModel,
     content,
-    stop_reason: hasToolUse ? "tool_use" : "end_turn",
+    stop_reason: hasToolUse
+      ? "tool_use"
+      : codexResponse.stop_reason === "max_tokens"
+        ? "max_tokens"
+        : "end_turn",
     stop_sequence: null,
     usage: {
       input_tokens: codexResponse.usage?.input_tokens ?? 0,

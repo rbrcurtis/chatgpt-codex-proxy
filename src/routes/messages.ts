@@ -38,11 +38,7 @@ function latestMessageHasToolResult(body: AnthropicRequest): boolean {
   return latest.content.some((block) => block.type === "tool_result");
 }
 
-export function isEmptyZeroToolResultResponse(response: AnthropicResponse): boolean {
-  const inputTokens = response.usage?.input_tokens ?? 0;
-  const outputTokens = response.usage?.output_tokens ?? 0;
-  if (inputTokens !== 0 || outputTokens !== 0) return false;
-
+export function isEmptyResponse(response: AnthropicResponse): boolean {
   const text = (response.content ?? [])
     .map((block) => block.type === "text" ? block.text ?? "" : "")
     .join("");
@@ -127,23 +123,28 @@ async function handleCodexMessages(body: AnthropicRequest): Promise<AnthropicRes
     `[chatgpt-codex-proxy] tool_diag parallel=${String(codexRequest.parallel_tool_calls)} codex_fn_calls=${codexFunctionCalls} codex_text_blocks=${codexOutputText} anthropic_tool_use=${anthropicBlocks.toolUse} anthropic_text_blocks=${anthropicBlocks.text} stop_reason=${anthropicResponse.stop_reason}`,
   );
 
-  if (latestMessageHasToolResult(body) && isEmptyZeroToolResultResponse(anthropicResponse)) {
-    const retryRequest = createToolResultRetryRequest(codexRequest);
-    if (retryRequest) {
-      const retryToolNames = (retryRequest.tools ?? []).map((tool) => tool.name).join(",");
-      console.log(
-        `[chatgpt-codex-proxy] tool_retry reason=empty_zero_after_tool_result original_tools=${codexRequest.tools?.length ?? 0} retry_tools=${retryRequest.tools?.length ?? 0} retry_tool_names=[${retryToolNames}]`,
-      );
+  if (isEmptyResponse(anthropicResponse)) {
+    const narrowedRequest = latestMessageHasToolResult(body)
+      ? createToolResultRetryRequest(codexRequest)
+      : null;
+    const retryRequest = narrowedRequest ?? codexRequest;
+    const retryToolNames = (retryRequest.tools ?? []).map((tool) => tool.name).join(",");
+    console.log(
+      `[chatgpt-codex-proxy] response_retry reason=empty_response strategy=${narrowedRequest ? "called_tools" : "same_request"} original_tools=${codexRequest.tools?.length ?? 0} retry_tools=${retryRequest.tools?.length ?? 0} retry_tool_names=[${retryToolNames}]`,
+    );
 
-      codexResponse = await codexClient.createResponse(retryRequest);
-      anthropicResponse = transformCodexToAnthropic(codexResponse, body.model);
-      codexFunctionCalls = countCodexFunctionCalls(codexResponse);
-      codexOutputText = countCodexOutputTextBlocks(codexResponse);
-      anthropicBlocks = countAnthropicBlocks(anthropicResponse);
+    codexResponse = await codexClient.createResponse(retryRequest);
+    anthropicResponse = transformCodexToAnthropic(codexResponse, body.model);
+    codexFunctionCalls = countCodexFunctionCalls(codexResponse);
+    codexOutputText = countCodexOutputTextBlocks(codexResponse);
+    anthropicBlocks = countAnthropicBlocks(anthropicResponse);
 
-      console.log(
-        `[chatgpt-codex-proxy] tool_retry_diag parallel=${String(retryRequest.parallel_tool_calls)} codex_fn_calls=${codexFunctionCalls} codex_text_blocks=${codexOutputText} anthropic_tool_use=${anthropicBlocks.toolUse} anthropic_text_blocks=${anthropicBlocks.text} stop_reason=${anthropicResponse.stop_reason}`,
-      );
+    console.log(
+      `[chatgpt-codex-proxy] response_retry_diag parallel=${String(retryRequest.parallel_tool_calls)} codex_fn_calls=${codexFunctionCalls} codex_text_blocks=${codexOutputText} anthropic_tool_use=${anthropicBlocks.toolUse} anthropic_text_blocks=${anthropicBlocks.text} stop_reason=${anthropicResponse.stop_reason}`,
+    );
+
+    if (isEmptyResponse(anthropicResponse)) {
+      throw new CodexApiError("Codex returned an empty response after retry.", 502);
     }
   }
 

@@ -4,7 +4,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 
 import app from "../src/server.js";
-import { createToolResultRetryRequest, isEmptyZeroToolResultResponse } from "../src/routes/messages.js";
+import { createToolResultRetryRequest, isEmptyResponse } from "../src/routes/messages.js";
 import type { CodexRequest } from "../src/transformers/request.js";
 import type { AnthropicResponse } from "../src/types/anthropic.js";
 
@@ -132,7 +132,7 @@ test("createToolResultRetryRequest keeps only previously called tools", () => {
   assert.equal(retry?.parallel_tool_calls, undefined);
 });
 
-test("isEmptyZeroToolResultResponse detects blank zero-token responses", () => {
+test("isEmptyResponse rejects blank responses regardless of token usage", () => {
   const response: AnthropicResponse = {
     id: "msg_1",
     type: "message",
@@ -141,11 +141,11 @@ test("isEmptyZeroToolResultResponse detects blank zero-token responses", () => {
     content: [{ type: "text", text: "" }],
     stop_reason: "end_turn",
     stop_sequence: null,
-    usage: { input_tokens: 0, output_tokens: 0 },
+    usage: { input_tokens: 12, output_tokens: 1 },
   };
 
-  assert.equal(isEmptyZeroToolResultResponse(response), true);
+  assert.equal(isEmptyResponse(response), true);
 
   response.content = [{ type: "text", text: "PONG" }];
-  assert.equal(isEmptyZeroToolResultResponse(response), false);
+  assert.equal(isEmptyResponse(response), false);
 });
